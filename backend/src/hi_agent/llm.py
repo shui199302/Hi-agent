@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import re
 from collections.abc import AsyncIterator
@@ -26,6 +27,7 @@ class ToolCall:
 class LlmFinal:
     content: str
     tool_calls: list[ToolCall] = field(default_factory=list)
+    reasoning_content: str = ""
 
 
 @dataclass
@@ -37,6 +39,79 @@ class LlmEvent:
 
 class _RetryableModelStatus(Exception):
     pass
+
+
+def _wire_tool_name(logical_name: str) -> str:
+    """Map dotted internal tool names to a provider-safe, stable function name."""
+
+    digest = hashlib.sha256(logical_name.encode("utf-8")).hexdigest()[:56]
+    return f"hiagent_{digest}"
+
+
+def _wire_payload(
+    messages: list[dict[str, Any]],
+    tools: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], dict[str, str]]:
+    """Encode tool names at the model boundary while preserving internal names."""
+
+    logical_to_wire: dict[str, str] = {}
+    wire_to_logical: dict[str, str] = {}
+    encoded_tools: list[dict[str, Any]] = []
+    for tool in tools:
+        encoded = dict(tool)
+        function = dict(tool.get("function") or {})
+        logical_name = str(function.get("name", ""))
+        wire_name = _wire_tool_name(logical_name)
+        logical_to_wire[logical_name] = wire_name
+        wire_to_logical[wire_name] = logical_name
+        function["name"] = wire_name
+        encoded["function"] = function
+        encoded_tools.append(encoded)
+
+    encoded_messages: list[dict[str, Any]] = []
+    for message in messages:
+        encoded_message = dict(message)
+        if tool_calls := message.get("tool_calls"):
+            encoded_calls: list[dict[str, Any]] = []
+            for call in tool_calls:
+                encoded_call = dict(call)
+                function = dict(call.get("function") or {})
+                logical_name = str(function.get("name", ""))
+                function["name"] = logical_to_wire.get(
+                    logical_name,
+                    _wire_tool_name(logical_name),
+                )
+                encoded_call["function"] = function
+                encoded_calls.append(encoded_call)
+            encoded_message["tool_calls"] = encoded_calls
+        if message.get("role") == "tool" and message.get("name"):
+            logical_name = str(message["name"])
+            encoded_message["name"] = logical_to_wire.get(
+                logical_name,
+                _wire_tool_name(logical_name),
+            )
+        encoded_messages.append(encoded_message)
+    return encoded_messages, encoded_tools, wire_to_logical
+
+
+async def _upstream_error_detail(response: Any, api_key: str) -> str:
+    try:
+        raw = bytes(await response.aread())
+    except (AttributeError, httpx.HTTPError):
+        return ""
+    detail = raw.decode("utf-8", errors="replace").strip()
+    if api_key:
+        detail = detail.replace(api_key, "<redacted>")
+    try:
+        payload = json.loads(detail)
+        error = payload.get("error") if isinstance(payload, dict) else None
+        if isinstance(error, dict):
+            message = str(error.get("message") or "").strip()
+            code = str(error.get("code") or "").strip()
+            detail = f"{code}: {message}" if code and code != message else message or detail
+    except json.JSONDecodeError:
+        pass
+    return detail[:2000]
 
 
 class ChatModel:
@@ -109,19 +184,21 @@ class OpenAICompatibleChatModel(ChatModel):
         messages: list[dict[str, Any]],
         tools: list[dict[str, Any]],
     ) -> AsyncIterator[LlmEvent]:
+        wire_messages, wire_tools, wire_to_logical = _wire_payload(messages, tools)
         payload: dict[str, Any] = {
             "model": self.model,
-            "messages": messages,
+            "messages": wire_messages,
             "stream": True,
         }
-        if tools:
-            payload["tools"] = tools
+        if wire_tools:
+            payload["tools"] = wire_tools
             payload["tool_choice"] = "auto"
         api_key = self.settings.resolve_secret(self.api_key_env)
         headers = {"Accept": "text/event-stream", "Content-Type": "application/json"}
         if api_key:
             headers["Authorization"] = f"Bearer {api_key}"
         content_parts: list[str] = []
+        reasoning_parts: list[str] = []
         tool_parts: dict[int, dict[str, str]] = {}
         partial_received = False
         for attempt in range(3):
@@ -134,8 +211,21 @@ class OpenAICompatibleChatModel(ChatModel):
                     json=payload,
                 ) as response:
                     response_status = int(getattr(response, "status_code", 200))
-                    if response_status == 429 or response_status >= 500:
-                        raise _RetryableModelStatus(f"HTTP {response_status}")
+                    if response_status >= 400:
+                        detail = await _upstream_error_detail(response, api_key)
+                        reason = f"HTTP {response_status}"
+                        if detail:
+                            reason += f": {detail}"
+                        if response_status == 429 or response_status >= 500:
+                            raise _RetryableModelStatus(reason)
+                        raise ServiceUnavailableError(
+                            "MODEL_UNAVAILABLE",
+                            "模型服务不可用，未静默切换到其他服务",
+                            base_url=self.base_url,
+                            model=self.model,
+                            http_status=response_status,
+                            reason=reason,
+                        )
                     response.raise_for_status()
                     async for line in response.aiter_lines():
                         if not line.startswith("data:"):
@@ -150,6 +240,9 @@ class OpenAICompatibleChatModel(ChatModel):
                         if not choices:
                             continue
                         delta = choices[0].get("delta", {})
+                        if reasoning := delta.get("reasoning_content"):
+                            partial_received = True
+                            reasoning_parts.append(reasoning)
                         if text := delta.get("content"):
                             partial_received = True
                             content_parts.append(text)
@@ -196,11 +289,18 @@ class OpenAICompatibleChatModel(ChatModel):
             calls.append(
                 ToolCall(
                     id=item["id"] or f"tool-call-{index}",
-                    name=item["name"],
+                    name=wire_to_logical.get(item["name"], item["name"]),
                     arguments=arguments,
                 )
             )
-        yield LlmEvent(kind="final", final=LlmFinal(content="".join(content_parts), tool_calls=calls))
+        yield LlmEvent(
+            kind="final",
+            final=LlmFinal(
+                content="".join(content_parts),
+                tool_calls=calls,
+                reasoning_content="".join(reasoning_parts),
+            ),
+        )
 
 
 def build_chat_model(snapshot: dict[str, Any], settings: Settings | None = None) -> ChatModel:

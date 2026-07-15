@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+import json
+import re
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
@@ -12,7 +14,7 @@ from hi_agent import config as config_module
 from hi_agent.config import Settings
 from hi_agent.database import configure_database, create_schema, session_factory
 from hi_agent.errors import HiAgentError
-from hi_agent.llm import OpenAICompatibleChatModel
+from hi_agent.llm import OpenAICompatibleChatModel, _wire_tool_name
 from hi_agent.mcp_client import McpClient, _tool_risk
 from hi_agent.models import AgentConfig, ChatSession, McpServerConfig, Run, RunStatus
 from hi_agent.rag import ParsedPage, chunk_pages, validate_filename
@@ -173,6 +175,166 @@ async def test_dotenv_api_key_is_used_without_being_serialized(
     assert captured["headers"]["Authorization"] == "Bearer dotenv-secret"
     assert settings.resolve_secret("CUSTOM_MODEL_KEY") == "custom-secret"
     assert "dotenv-secret" not in repr(settings.model_dump())
+
+
+@pytest.mark.asyncio
+async def test_tool_names_are_provider_safe_and_round_trip_to_internal_names(
+    settings: Settings,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, Any] = {}
+
+    class FakeResponse:
+        status_code = 200
+
+        def raise_for_status(self) -> None:
+            return None
+
+        async def aiter_lines(self) -> Any:
+            wire_name = captured["payload"]["tools"][0]["function"]["name"]
+            yield "data: " + json.dumps(
+                {
+                    "choices": [
+                        {
+                            "delta": {
+                                "reasoning_content": "checking time",
+                                "tool_calls": [
+                                    {
+                                        "index": 0,
+                                        "id": "call-1",
+                                        "function": {"name": wire_name, "arguments": "{}"},
+                                    }
+                                ],
+                            }
+                        }
+                    ]
+                }
+            )
+            yield "data: [DONE]"
+
+    class FakeStream:
+        async def __aenter__(self) -> FakeResponse:
+            return FakeResponse()
+
+        async def __aexit__(self, *_: Any) -> None:
+            return None
+
+    class FakeClient:
+        def __init__(self, **_: Any) -> None:
+            pass
+
+        async def __aenter__(self) -> FakeClient:
+            return self
+
+        async def __aexit__(self, *_: Any) -> None:
+            return None
+
+        def stream(self, *_: Any, **kwargs: Any) -> FakeStream:
+            captured["payload"] = kwargs["json"]
+            return FakeStream()
+
+    monkeypatch.setattr("hi_agent.llm.httpx.AsyncClient", FakeClient)
+    model = OpenAICompatibleChatModel(
+        base_url="http://model.local/v1",
+        model="test-model",
+        api_key_env="MODEL_KEY",
+        timeout_seconds=2,
+        settings=settings,
+    )
+    logical_name = "builtin.current_time"
+    messages = [
+        {
+            "role": "assistant",
+            "content": "",
+            "reasoning_content": "previous reasoning",
+            "tool_calls": [
+                {
+                    "id": "previous-call",
+                    "type": "function",
+                    "function": {"name": logical_name, "arguments": "{}"},
+                }
+            ],
+        },
+        {
+            "role": "tool",
+            "tool_call_id": "previous-call",
+            "name": logical_name,
+            "content": "result",
+        },
+    ]
+    tools = [
+        {
+            "type": "function",
+            "function": {
+                "name": logical_name,
+                "description": "time",
+                "parameters": {"type": "object", "properties": {}},
+            },
+        }
+    ]
+
+    events = [event async for event in model.stream(messages, tools)]
+
+    wire_name = captured["payload"]["tools"][0]["function"]["name"]
+    assert wire_name == _wire_tool_name(logical_name)
+    assert re.fullmatch(r"[a-zA-Z0-9_-]{1,64}", wire_name)
+    assert captured["payload"]["messages"][0]["tool_calls"][0]["function"]["name"] == wire_name
+    assert captured["payload"]["messages"][1]["name"] == wire_name
+    assert events[-1].final is not None
+    assert events[-1].final.tool_calls[0].name == logical_name
+    assert events[-1].final.reasoning_content == "checking time"
+
+
+@pytest.mark.asyncio
+async def test_upstream_error_body_is_reported_without_exposing_api_key(
+    settings: Settings,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings.dotenv_path = tmp_path / ".env"
+    settings.dotenv_path.write_text("MODEL_KEY=top-secret\n", encoding="utf-8")
+
+    class FakeResponse:
+        status_code = 400
+
+        async def aread(self) -> bytes:
+            return b'{"error":{"code":"invalid_request_error","message":"bad tool top-secret"}}'
+
+        async def __aenter__(self) -> FakeResponse:
+            return self
+
+        async def __aexit__(self, *_: Any) -> None:
+            return None
+
+    class FakeClient:
+        def __init__(self, **_: Any) -> None:
+            pass
+
+        async def __aenter__(self) -> FakeClient:
+            return self
+
+        async def __aexit__(self, *_: Any) -> None:
+            return None
+
+        def stream(self, *_: Any, **__: Any) -> FakeResponse:
+            return FakeResponse()
+
+    monkeypatch.setattr("hi_agent.llm.httpx.AsyncClient", FakeClient)
+    model = OpenAICompatibleChatModel(
+        base_url="http://model.local/v1",
+        model="test-model",
+        api_key_env="MODEL_KEY",
+        timeout_seconds=2,
+        settings=settings,
+    )
+
+    with pytest.raises(HiAgentError) as error:
+        _ = [event async for event in model.stream([{"role": "user", "content": "hi"}], [])]
+
+    assert error.value.code == "MODEL_UNAVAILABLE"
+    assert error.value.details["http_status"] == 400
+    assert "invalid_request_error" in error.value.details["reason"]
+    assert "top-secret" not in error.value.details["reason"]
 
 
 def test_process_environment_precedes_dotenv(

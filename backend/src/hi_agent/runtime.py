@@ -596,6 +596,7 @@ class RunManager:
             for tool in state.get("tools", [])
         ]
         content = ""
+        reasoning_content = ""
         tool_calls: list[ToolCall] = []
         async for event in model.stream(list(state["messages"]), openai_tools):
             self._ensure_active(run_id)
@@ -610,29 +611,31 @@ class RunManager:
             elif event.final is not None:
                 content = event.final.content or content
                 tool_calls = event.final.tool_calls
+                reasoning_content = event.final.reasoning_content
         messages = list(state["messages"])
         queue = [
             {"id": call.id, "name": call.name, "arguments": call.arguments}
             for call in tool_calls
         ]
         if queue:
-            messages.append(
-                {
-                    "role": "assistant",
-                    "content": content,
-                    "tool_calls": [
-                        {
-                            "id": call["id"],
-                            "type": "function",
-                            "function": {
-                                "name": call["name"],
-                                "arguments": json.dumps(call["arguments"], ensure_ascii=False),
-                            },
-                        }
-                        for call in queue
-                    ],
-                }
-            )
+            assistant_message: dict[str, Any] = {
+                "role": "assistant",
+                "content": content,
+                "tool_calls": [
+                    {
+                        "id": call["id"],
+                        "type": "function",
+                        "function": {
+                            "name": call["name"],
+                            "arguments": json.dumps(call["arguments"], ensure_ascii=False),
+                        },
+                    }
+                    for call in queue
+                ],
+            }
+            if reasoning_content:
+                assistant_message["reasoning_content"] = reasoning_content
+            messages.append(assistant_message)
         else:
             messages.append({"role": "assistant", "content": content})
         tool_limit_reached = bool(
