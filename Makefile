@@ -3,8 +3,8 @@ export PATH := $(CURDIR)/.tools/bin:$(CURDIR)/.tools/node/bin:$(PATH)
 export UV_CACHE_DIR := $(CURDIR)/.tools/uv-cache
 export UV_PYTHON_INSTALL_DIR := $(CURDIR)/.tools/python
 export PLAYWRIGHT_BROWSERS_PATH := $(CURDIR)/.tools/playwright
-UV := $(shell command -v uv 2>/dev/null || printf '%s' '$(CURDIR)/.tools/bin/uv')
-PNPM := $(shell command -v pnpm 2>/dev/null || printf '%s' '$(CURDIR)/.tools/bin/pnpm')
+UV := $(if $(wildcard $(CURDIR)/.tools/bin/uv),$(CURDIR)/.tools/bin/uv,$(shell command -v uv))
+PNPM := $(if $(wildcard $(CURDIR)/.tools/bin/pnpm),$(CURDIR)/.tools/bin/pnpm,$(shell command -v pnpm))
 
 .PHONY: install install-backend install-web dev start stop verify backend-test web-test build doctor compose-check real-rag-test
 

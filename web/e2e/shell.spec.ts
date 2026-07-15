@@ -27,11 +27,11 @@ test('renders the Chinese console shell and navigates between major areas', asyn
 
   await page.getByRole('button', { name: /知识库/ }).first().click()
   await expect(page).toHaveURL(/#\/knowledge$/)
-  await expect(page.getByRole('heading', { name: '知识库' })).toBeVisible()
+  await expect(page.getByRole('heading', { name: '知识库', exact: true })).toBeVisible()
 
   await page.getByRole('button', { name: /模型与系统/ }).first().click()
   await expect(page).toHaveURL(/#\/models$/)
-  await expect(page.getByRole('heading', { name: '模型与系统' })).toBeVisible()
+  await expect(page.getByRole('heading', { name: '模型与系统', exact: true })).toBeVisible()
 })
 
 test('recovers a terminal event that races with the active-run lookup', async ({ page }) => {
