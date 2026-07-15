@@ -89,6 +89,7 @@ COREPACK_BIN="$TOOLS_DIR/node/bin/corepack"
 export COREPACK_HOME="${COREPACK_HOME:-$TOOLS_DIR/corepack}"
 "$COREPACK_BIN" enable --install-directory "$BIN_DIR"
 "$COREPACK_BIN" prepare "pnpm@${PNPM_VERSION}" --activate
+ln -sfn "../../scripts/pnpm-wrapper.sh" "$BIN_DIR/pnpm"
 hash -r
 [[ -x "$BIN_DIR/pnpm" ]] || die "corepack 未能创建项目内 pnpm"
 [[ "$("$BIN_DIR/pnpm" --version 2>/dev/null)" == "$PNPM_VERSION" ]] \
