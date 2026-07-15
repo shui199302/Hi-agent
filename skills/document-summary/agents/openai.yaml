@@ -1,0 +1,4 @@
+interface:
+  display_name: "Document Summary"
+  short_description: "Produce faithful summaries with source evidence"
+  default_prompt: "Use $document-summary to create a concise, evidence-based summary of this document."

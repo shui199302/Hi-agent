@@ -1,0 +1,61 @@
+[build-system]
+requires = ["hatchling>=1.27"]
+build-backend = "hatchling.build"
+
+[project]
+name = "hi-agent"
+version = "0.1.0"
+description = "Local-first agent runtime with LangGraph, RAG, MCP and Agent Skills"
+readme = "README.md"
+requires-python = ">=3.12,<3.15"
+license = { text = "Apache-2.0" }
+dependencies = [
+  "fastapi>=0.115,<1",
+  "httpx>=0.28,<1",
+  "langgraph>=0.6,<2",
+  "langgraph-checkpoint-sqlite>=2.0,<4",
+  "mcp>=1.12,<2",
+  "pydantic-settings>=2.7,<3",
+  "python-dotenv>=1,<2",
+  "python-docx>=1.1,<2",
+  "python-multipart>=0.0.20,<1",
+  "pypdf>=5,<7",
+  "qdrant-client[fastembed]>=1.13,<2",
+  "sqlalchemy>=2.0,<3",
+  "uvicorn[standard]>=0.34,<1",
+]
+
+[project.optional-dependencies]
+dev = [
+  "mypy>=1.15,<2",
+  "pytest>=8.3,<9",
+  "pytest-asyncio>=0.25,<1",
+  "ruff>=0.11,<1",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/hi_agent"]
+
+[tool.pytest.ini_options]
+addopts = "-q"
+asyncio_mode = "auto"
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 120
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]
+ignore = ["B008"]
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+plugins = ["pydantic.mypy"]
+exclude = ["tests"]
+warn_unused_ignores = false
+
+[[tool.mypy.overrides]]
+module = ["langgraph.*", "mcp.*", "qdrant_client.*", "fastembed.*", "pypdf.*", "docx.*"]
+ignore_missing_imports = true

@@ -1,0 +1,4 @@
+interface:
+  display_name: "Report Writing"
+  short_description: "Create concise reports from supplied evidence"
+  default_prompt: "Use $report-writing to turn this evidence into a clear, decision-ready report."

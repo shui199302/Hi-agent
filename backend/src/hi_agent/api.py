@@ -1,0 +1,634 @@
+"""Versioned REST and resumable SSE API."""
+
+from __future__ import annotations
+
+import asyncio
+import json
+import time
+from collections.abc import AsyncIterator
+from typing import Any, cast
+
+from fastapi import APIRouter, Depends, File, Header, Query, Request, Response, UploadFile, status
+from fastapi.responses import StreamingResponse
+from pydantic import BaseModel
+from sqlalchemy import func, select
+from sqlalchemy.orm import Session
+
+from . import __version__
+from .database import get_db
+from .errors import ConflictError, HiAgentError, NotFoundError
+from .mcp_client import McpClient
+from .models import (
+    ACTIVE_RUN_STATUSES,
+    AgentConfig,
+    Approval,
+    ChatSession,
+    Document,
+    KnowledgeBase,
+    McpServerConfig,
+    Message,
+    ModelEndpoint,
+    Run,
+    RunEvent,
+    RunStatus,
+    now_utc,
+)
+from .rag import RagService
+from .runtime import RunManager, snapshot_agent
+from .schemas import (
+    AgentCreate,
+    AgentRead,
+    AgentUpdate,
+    ApprovalDecision,
+    ApprovalRead,
+    CancelResponse,
+    DocumentRead,
+    KnowledgeBaseCreate,
+    KnowledgeBaseRead,
+    KnowledgeBaseUpdate,
+    McpProbeResponse,
+    McpServerCreate,
+    McpServerRead,
+    McpServerUpdate,
+    ModelEndpointCreate,
+    ModelEndpointRead,
+    ModelEndpointUpdate,
+    RunAccepted,
+    RunCreate,
+    RunEventRead,
+    RunRead,
+    SearchRequest,
+    SearchResponse,
+    SessionCreate,
+    SessionDetail,
+    SessionRead,
+    SessionUpdate,
+    SkillDetail,
+    SkillMetadata,
+    SystemStatus,
+)
+from .skills import SkillRegistry
+
+router = APIRouter(prefix="/api/v1")
+def _get[ModelT](db: Session, model: type[ModelT], item_id: str, label: str) -> ModelT:
+    item = db.get(model, item_id)
+    if item is None:
+        raise NotFoundError(label, item_id)
+    return item
+
+
+def _commit[ModelT](db: Session, item: ModelT) -> ModelT:
+    db.add(item)
+    db.commit()
+    db.refresh(item)
+    return item
+
+
+def _apply[ModelT](item: ModelT, payload: BaseModel) -> ModelT:
+    for key, value in payload.model_dump(exclude_unset=True, mode="json").items():
+        setattr(item, key, value)
+    return item
+
+
+def _manager(request: Request) -> RunManager:
+    return cast(RunManager, request.app.state.run_manager)
+
+
+def _rag(request: Request) -> RagService:
+    return cast(RagService, request.app.state.rag_service)
+
+
+def _mcp(request: Request) -> McpClient:
+    return cast(McpClient, request.app.state.mcp_client)
+
+
+def _skills(request: Request) -> SkillRegistry:
+    return cast(SkillRegistry, request.app.state.skill_registry)
+
+
+def _knowledge_base_read(db: Session, kb: KnowledgeBase) -> KnowledgeBaseRead:
+    document_count, chunk_count = db.execute(
+        select(
+            func.count(Document.id),
+            func.coalesce(func.sum(Document.chunk_count), 0),
+        ).where(Document.knowledge_base_id == kb.id)
+    ).one()
+    return KnowledgeBaseRead.model_validate(kb).model_copy(
+        update={
+            "document_count": int(document_count),
+            "chunk_count": int(chunk_count),
+        }
+    )
+
+
+@router.get("/health")
+def health() -> dict[str, str]:
+    return {"status": "ok", "version": __version__}
+
+
+@router.get("/system/status", response_model=SystemStatus)
+def system_status(request: Request, db: Session = Depends(get_db)) -> SystemStatus:
+    active = db.scalar(select(func.count()).select_from(Run).where(Run.status.in_(ACTIVE_RUN_STATUSES))) or 0
+    interrupted = db.scalar(
+        select(func.count()).select_from(Run).where(Run.status == RunStatus.interrupted.value)
+    ) or 0
+    settings = request.app.state.settings
+    manager = _manager(request)
+    return SystemStatus(
+        status="ok",
+        version=__version__,
+        database="ok",
+        embedding_backend=settings.embedding_backend,
+        model_configured=bool(db.scalar(select(func.count()).select_from(ModelEndpoint).where(ModelEndpoint.enabled))),
+        active_runs=active,
+        interrupted_runs=interrupted,
+        skills=len(manager.skills.list()),
+        data_dir=str(settings.data_dir),
+    )
+
+
+@router.get("/models", response_model=list[ModelEndpointRead])
+def list_models(db: Session = Depends(get_db)) -> list[ModelEndpoint]:
+    return list(db.scalars(select(ModelEndpoint).order_by(ModelEndpoint.created_at)).all())
+
+
+@router.post("/models", response_model=ModelEndpointRead, status_code=status.HTTP_201_CREATED)
+def create_model(payload: ModelEndpointCreate, db: Session = Depends(get_db)) -> ModelEndpoint:
+    return _commit(db, ModelEndpoint(**payload.model_dump(mode="json")))
+
+
+@router.get("/models/{model_id}", response_model=ModelEndpointRead)
+def get_model(model_id: str, db: Session = Depends(get_db)) -> ModelEndpoint:
+    return _get(db, ModelEndpoint, model_id, "ModelEndpoint")
+
+
+@router.patch("/models/{model_id}", response_model=ModelEndpointRead)
+def update_model(
+    model_id: str, payload: ModelEndpointUpdate, db: Session = Depends(get_db)
+) -> ModelEndpoint:
+    return _commit(db, _apply(_get(db, ModelEndpoint, model_id, "ModelEndpoint"), payload))
+
+
+@router.delete("/models/{model_id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_model(model_id: str, db: Session = Depends(get_db)) -> Response:
+    db.delete(_get(db, ModelEndpoint, model_id, "ModelEndpoint"))
+    db.commit()
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@router.get("/knowledge-bases", response_model=list[KnowledgeBaseRead])
+def list_knowledge_bases(db: Session = Depends(get_db)) -> list[KnowledgeBaseRead]:
+    items = db.scalars(select(KnowledgeBase).order_by(KnowledgeBase.created_at)).all()
+    return [_knowledge_base_read(db, item) for item in items]
+
+
+@router.post(
+    "/knowledge-bases", response_model=KnowledgeBaseRead, status_code=status.HTTP_201_CREATED
+)
+def create_knowledge_base(
+    request: Request, payload: KnowledgeBaseCreate, db: Session = Depends(get_db)
+) -> KnowledgeBaseRead:
+    values = payload.model_dump()
+    if "embedding_model" not in payload.model_fields_set:
+        values["embedding_model"] = request.app.state.settings.embedding_model
+    return _knowledge_base_read(db, _commit(db, KnowledgeBase(**values)))
+
+
+@router.get("/knowledge-bases/{kb_id}", response_model=KnowledgeBaseRead)
+def get_knowledge_base(kb_id: str, db: Session = Depends(get_db)) -> KnowledgeBaseRead:
+    return _knowledge_base_read(db, _get(db, KnowledgeBase, kb_id, "KnowledgeBase"))
+
+
+@router.patch("/knowledge-bases/{kb_id}", response_model=KnowledgeBaseRead)
+def update_knowledge_base(
+    kb_id: str, payload: KnowledgeBaseUpdate, db: Session = Depends(get_db)
+) -> KnowledgeBaseRead:
+    kb = _commit(db, _apply(_get(db, KnowledgeBase, kb_id, "KnowledgeBase"), payload))
+    return _knowledge_base_read(db, kb)
+
+
+@router.delete("/knowledge-bases/{kb_id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_knowledge_base(request: Request, kb_id: str, db: Session = Depends(get_db)) -> Response:
+    kb = _get(db, KnowledgeBase, kb_id, "KnowledgeBase")
+    documents = list(db.scalars(select(Document).where(Document.knowledge_base_id == kb_id)).all())
+    for document in documents:
+        _rag(request).delete_document(db, document)
+    db.delete(kb)
+    db.commit()
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@router.get("/documents", response_model=list[DocumentRead])
+def list_all_documents(db: Session = Depends(get_db)) -> list[Document]:
+    return list(db.scalars(select(Document).order_by(Document.created_at.desc())).all())
+
+
+@router.get("/knowledge-bases/{kb_id}/documents", response_model=list[DocumentRead])
+def list_documents(kb_id: str, db: Session = Depends(get_db)) -> list[Document]:
+    _get(db, KnowledgeBase, kb_id, "KnowledgeBase")
+    return list(
+        db.scalars(
+            select(Document)
+            .where(Document.knowledge_base_id == kb_id)
+            .order_by(Document.created_at.desc())
+        ).all()
+    )
+
+
+@router.post(
+    "/knowledge-bases/{kb_id}/documents",
+    response_model=DocumentRead,
+    status_code=status.HTTP_201_CREATED,
+)
+async def upload_document(
+    request: Request,
+    kb_id: str,
+    file: UploadFile = File(...),
+    db: Session = Depends(get_db),
+) -> Document:
+    _get(db, KnowledgeBase, kb_id, "KnowledgeBase")
+    maximum = request.app.state.settings.upload_max_bytes
+    content = await file.read(maximum + 1)
+    if len(content) > maximum:
+        raise HiAgentError(
+            "UPLOAD_TOO_LARGE",
+            "上传文件超过 50MB 限制",
+            status_code=413,
+            details={"max_bytes": maximum},
+        )
+    rag_service = _rag(request)
+    filename = file.filename or ""
+    media_type = file.content_type or "application/octet-stream"
+
+    def ingest_in_worker() -> Document:
+        with session_factory_for_request()() as worker_db:
+            worker_kb = _get(worker_db, KnowledgeBase, kb_id, "KnowledgeBase")
+            document = rag_service.ingest(
+                worker_db,
+                worker_kb,
+                filename,
+                media_type,
+                content,
+            )
+            worker_db.expunge(document)
+            return document
+
+    return await asyncio.to_thread(ingest_in_worker)
+
+
+@router.get("/documents/{document_id}", response_model=DocumentRead)
+def get_document(document_id: str, db: Session = Depends(get_db)) -> Document:
+    return _get(db, Document, document_id, "Document")
+
+
+@router.delete("/documents/{document_id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_document(request: Request, document_id: str, db: Session = Depends(get_db)) -> Response:
+    _rag(request).delete_document(db, _get(db, Document, document_id, "Document"))
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@router.post("/knowledge-bases/{kb_id}/search", response_model=SearchResponse)
+def search_knowledge_base(
+    request: Request,
+    kb_id: str,
+    payload: SearchRequest,
+    db: Session = Depends(get_db),
+) -> SearchResponse:
+    kb = _get(db, KnowledgeBase, kb_id, "KnowledgeBase")
+    return SearchResponse(
+        items=_rag(request).search(db, kb, payload.query, payload.top_k)
+    )
+
+
+def _validate_agent(
+    request: Request,
+    db: Session,
+    payload: AgentCreate | AgentUpdate,
+) -> None:
+    data = payload.model_dump(exclude_unset=True)
+    if endpoint_id := data.get("model_endpoint_id"):
+        _get(db, ModelEndpoint, endpoint_id, "ModelEndpoint")
+    if kb_id := data.get("knowledge_base_id"):
+        _get(db, KnowledgeBase, kb_id, "KnowledgeBase")
+    for server_id in data.get("mcp_servers") or []:
+        _get(db, McpServerConfig, server_id, "McpServer")
+    available_skills = {item.name for item in _skills(request).list() if item.valid}
+    invalid_skills = sorted(set(data.get("skills") or []) - available_skills)
+    if invalid_skills:
+        raise HiAgentError(
+            "SKILL_NOT_FOUND_OR_INVALID",
+            "Agent 引用了不存在或无效的 Skill",
+            details={"skills": invalid_skills},
+        )
+
+
+@router.get("/agents", response_model=list[AgentRead])
+def list_agents(db: Session = Depends(get_db)) -> list[AgentConfig]:
+    return list(db.scalars(select(AgentConfig).order_by(AgentConfig.created_at)).all())
+
+
+@router.post("/agents", response_model=AgentRead, status_code=status.HTTP_201_CREATED)
+def create_agent(
+    request: Request,
+    payload: AgentCreate,
+    db: Session = Depends(get_db),
+) -> AgentConfig:
+    _validate_agent(request, db, payload)
+    return _commit(db, AgentConfig(**payload.model_dump()))
+
+
+@router.get("/agents/{agent_id}", response_model=AgentRead)
+def get_agent(agent_id: str, db: Session = Depends(get_db)) -> AgentConfig:
+    return _get(db, AgentConfig, agent_id, "Agent")
+
+
+@router.patch("/agents/{agent_id}", response_model=AgentRead)
+def update_agent(
+    request: Request,
+    agent_id: str,
+    payload: AgentUpdate,
+    db: Session = Depends(get_db),
+) -> AgentConfig:
+    _validate_agent(request, db, payload)
+    return _commit(db, _apply(_get(db, AgentConfig, agent_id, "Agent"), payload))
+
+
+@router.delete("/agents/{agent_id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_agent(agent_id: str, db: Session = Depends(get_db)) -> Response:
+    agent = _get(db, AgentConfig, agent_id, "Agent")
+    in_use = db.scalar(select(func.count()).select_from(ChatSession).where(ChatSession.agent_id == agent_id))
+    if in_use:
+        raise ConflictError("AGENT_IN_USE", "已有会话使用该 Agent", sessions=in_use)
+    db.delete(agent)
+    db.commit()
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@router.get("/mcp/servers", response_model=list[McpServerRead])
+def list_mcp_servers(db: Session = Depends(get_db)) -> list[McpServerConfig]:
+    return list(db.scalars(select(McpServerConfig).order_by(McpServerConfig.created_at)).all())
+
+
+@router.post("/mcp/servers", response_model=McpServerRead, status_code=status.HTTP_201_CREATED)
+def create_mcp_server(payload: McpServerCreate, db: Session = Depends(get_db)) -> McpServerConfig:
+    return _commit(db, McpServerConfig(**payload.model_dump(mode="json")))
+
+
+@router.get("/mcp/servers/{server_id}", response_model=McpServerRead)
+def get_mcp_server(server_id: str, db: Session = Depends(get_db)) -> McpServerConfig:
+    return _get(db, McpServerConfig, server_id, "McpServer")
+
+
+@router.patch("/mcp/servers/{server_id}", response_model=McpServerRead)
+def update_mcp_server(
+    server_id: str, payload: McpServerUpdate, db: Session = Depends(get_db)
+) -> McpServerConfig:
+    server = _get(db, McpServerConfig, server_id, "McpServer")
+    updated = _apply(server, payload)
+    if updated.transport == "stdio" and not updated.command:
+        raise HiAgentError("MCP_INVALID_CONFIG", "stdio MCP 缺少 command")
+    if updated.transport == "streamable_http" and not updated.url:
+        raise HiAgentError("MCP_INVALID_CONFIG", "streamable_http MCP 缺少 url")
+    return _commit(db, updated)
+
+
+@router.delete("/mcp/servers/{server_id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_mcp_server(server_id: str, db: Session = Depends(get_db)) -> Response:
+    db.delete(_get(db, McpServerConfig, server_id, "McpServer"))
+    db.commit()
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@router.post("/mcp/servers/{server_id}/probe", response_model=McpProbeResponse)
+async def probe_mcp_server(
+    request: Request, server_id: str, db: Session = Depends(get_db)
+) -> McpProbeResponse:
+    server = _get(db, McpServerConfig, server_id, "McpServer")
+    try:
+        tools = await _mcp(request).list_tools(server)
+        server.status = "online"
+        server.last_error = None
+        _commit(db, server)
+        return McpProbeResponse(status="online", tools=tools)
+    except HiAgentError as exc:
+        server.status = "error"
+        server.last_error = exc.message
+        _commit(db, server)
+        return McpProbeResponse(status="error", error=exc.message)
+
+
+@router.get("/skills", response_model=list[SkillMetadata])
+def list_skills(request: Request) -> list[SkillMetadata]:
+    return _skills(request).list()
+
+
+@router.get("/skills/{skill_name}", response_model=SkillDetail)
+def get_skill(request: Request, skill_name: str) -> SkillDetail:
+    return _skills(request).get(skill_name)
+
+
+@router.get("/sessions", response_model=list[SessionRead])
+def list_sessions(db: Session = Depends(get_db)) -> list[ChatSession]:
+    return list(db.scalars(select(ChatSession).order_by(ChatSession.updated_at.desc())).all())
+
+
+@router.post("/sessions", response_model=SessionRead, status_code=status.HTTP_201_CREATED)
+def create_session(payload: SessionCreate, db: Session = Depends(get_db)) -> ChatSession:
+    agent = _get(db, AgentConfig, payload.agent_id, "Agent")
+    if not agent.enabled:
+        raise HiAgentError("AGENT_DISABLED", "Agent 已禁用")
+    return _commit(db, ChatSession(**payload.model_dump()))
+
+
+@router.get("/sessions/{session_id}", response_model=SessionDetail)
+def get_session(session_id: str, db: Session = Depends(get_db)) -> ChatSession:
+    return _get(db, ChatSession, session_id, "Session")
+
+
+@router.patch("/sessions/{session_id}", response_model=SessionRead)
+def update_session(
+    session_id: str, payload: SessionUpdate, db: Session = Depends(get_db)
+) -> ChatSession:
+    return _commit(db, _apply(_get(db, ChatSession, session_id, "Session"), payload))
+
+
+@router.delete("/sessions/{session_id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_session(session_id: str, db: Session = Depends(get_db)) -> Response:
+    session = _get(db, ChatSession, session_id, "Session")
+    active = db.scalar(
+        select(func.count())
+        .select_from(Run)
+        .where(Run.session_id == session_id, Run.status.in_(ACTIVE_RUN_STATUSES))
+    )
+    if active:
+        raise ConflictError("SESSION_HAS_ACTIVE_RUN", "会话仍有活动 Run")
+    db.delete(session)
+    db.commit()
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@router.post(
+    "/sessions/{session_id}/runs",
+    response_model=RunAccepted,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+async def create_run(
+    request: Request,
+    session_id: str,
+    payload: RunCreate,
+    db: Session = Depends(get_db),
+) -> RunAccepted:
+    chat_session = _get(db, ChatSession, session_id, "Session")
+    active = db.scalar(
+        select(Run).where(Run.session_id == session_id, Run.status.in_(ACTIVE_RUN_STATUSES))
+    )
+    if active:
+        raise ConflictError(
+            "SESSION_RUN_CONFLICT", "每个会话同时只允许一个活动 Run", run_id=active.id
+        )
+    agent = _get(db, AgentConfig, chat_session.agent_id, "Agent")
+    if not agent.enabled:
+        raise HiAgentError("AGENT_DISABLED", "Agent 已禁用")
+    snapshot = snapshot_agent(db, agent)
+    run = Run(
+        session_id=session_id,
+        agent_id=agent.id,
+        input=payload.message,
+        status=RunStatus.queued.value,
+        config_snapshot=snapshot,
+    )
+    db.add(run)
+    db.add(Message(session_id=session_id, role="user", content=payload.message))
+    chat_session.updated_at = now_utc()
+    db.commit()
+    db.refresh(run)
+    await _manager(request).start(run.id)
+    return RunAccepted(
+        run_id=run.id,
+        status=run.status,
+        events_url=f"/api/v1/runs/{run.id}/events",
+    )
+
+
+@router.get("/runs", response_model=list[RunRead])
+def list_runs(
+    session_id: str | None = Query(default=None), db: Session = Depends(get_db)
+) -> list[Run]:
+    statement = select(Run).order_by(Run.created_at.desc())
+    if session_id:
+        statement = statement.where(Run.session_id == session_id)
+    return list(db.scalars(statement).all())
+
+
+@router.get("/runs/{run_id}", response_model=RunRead)
+def get_run(run_id: str, db: Session = Depends(get_db)) -> Run:
+    return _get(db, Run, run_id, "Run")
+
+
+@router.get("/runs/{run_id}/event-log", response_model=list[RunEventRead])
+def get_run_events(
+    run_id: str,
+    after: int = Query(default=0, ge=0),
+    db: Session = Depends(get_db),
+) -> list[RunEvent]:
+    _get(db, Run, run_id, "Run")
+    return list(
+        db.scalars(
+            select(RunEvent)
+            .where(RunEvent.run_id == run_id, RunEvent.id > after)
+            .order_by(RunEvent.id)
+        ).all()
+    )
+
+
+@router.get("/runs/{run_id}/events")
+async def stream_run_events(
+    request: Request,
+    run_id: str,
+    after: int = Query(default=0, ge=0),
+    last_event_id: str | None = Header(default=None, alias="Last-Event-ID"),
+) -> StreamingResponse:
+    with session_factory_for_request()() as db:
+        _get(db, Run, run_id, "Run")
+    cursor = after
+    if last_event_id:
+        try:
+            cursor = max(cursor, int(last_event_id))
+        except ValueError:
+            raise HiAgentError("INVALID_LAST_EVENT_ID", "Last-Event-ID 必须为整数") from None
+
+    async def events() -> AsyncIterator[str]:
+        nonlocal cursor
+        last_heartbeat = time.monotonic()
+        while True:
+            if await request.is_disconnected():
+                return
+            with session_factory_for_request()() as db:
+                items = db.scalars(
+                    select(RunEvent)
+                    .where(RunEvent.run_id == run_id, RunEvent.id > cursor)
+                    .order_by(RunEvent.id)
+                    .limit(250)
+                ).all()
+                run = db.get(Run, run_id)
+                terminal = run is None or run.status not in ACTIVE_RUN_STATUSES
+            for item in items:
+                cursor = item.id
+                payload = RunEventRead.model_validate(item).model_dump(mode="json")
+                yield (
+                    f"id: {item.id}\n"
+                    f"event: {item.type}\n"
+                    f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
+                )
+            if terminal and not items:
+                return
+            if time.monotonic() - last_heartbeat >= request.app.state.settings.sse_heartbeat_seconds:
+                yield ": heartbeat\n\n"
+                last_heartbeat = time.monotonic()
+            await asyncio.sleep(request.app.state.settings.event_poll_seconds)
+
+    return StreamingResponse(
+        events(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache, no-transform",
+            "X-Accel-Buffering": "no",
+            "Connection": "keep-alive",
+        },
+    )
+
+
+def session_factory_for_request() -> Any:
+    # Import here keeps the API dependency override-friendly while SSE outlives a request dependency.
+    from .database import session_factory
+
+    return session_factory()
+
+
+@router.post("/runs/{run_id}/cancel", response_model=CancelResponse)
+async def cancel_run(request: Request, run_id: str) -> CancelResponse:
+    result = await _manager(request).cancel(run_id)
+    return CancelResponse(run_id=run_id, status=result)
+
+
+@router.get("/runs/{run_id}/approvals", response_model=list[ApprovalRead])
+def list_approvals(run_id: str, db: Session = Depends(get_db)) -> list[Approval]:
+    _get(db, Run, run_id, "Run")
+    return list(
+        db.scalars(select(Approval).where(Approval.run_id == run_id).order_by(Approval.created_at)).all()
+    )
+
+
+@router.post("/runs/{run_id}/approvals/{approval_id}", response_model=ApprovalRead)
+async def decide_approval(
+    request: Request,
+    run_id: str,
+    approval_id: str,
+    payload: ApprovalDecision,
+) -> Approval:
+    return await _manager(request).resume(
+        run_id,
+        approval_id,
+        payload.decision,
+        payload.reason,
+    )

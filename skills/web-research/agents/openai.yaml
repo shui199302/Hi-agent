@@ -1,0 +1,4 @@
+interface:
+  display_name: "Web Research"
+  short_description: "Research current questions with authoritative links"
+  default_prompt: "Use $web-research to investigate this question using current, authoritative web sources."

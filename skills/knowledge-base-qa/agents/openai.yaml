@@ -1,0 +1,4 @@
+interface:
+  display_name: "Knowledge Base QA"
+  short_description: "Ground answers in indexed documents and citations"
+  default_prompt: "Use $knowledge-base-qa to answer this question from my indexed documents with verifiable citations."

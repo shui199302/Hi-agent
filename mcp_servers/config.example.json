@@ -1,0 +1,22 @@
+{
+  "mcpServers": {
+    "hi-agent-workspace-stdio": {
+      "transport": "stdio",
+      "command": "uv",
+      "args": [
+        "run",
+        "--project",
+        "/absolute/path/to/Hi-agent/mcp_servers",
+        "hi-agent-mcp",
+        "--transport",
+        "stdio",
+        "--workspace",
+        "/absolute/path/to/workspace"
+      ]
+    },
+    "hi-agent-workspace-http": {
+      "transport": "streamable_http",
+      "url": "http://127.0.0.1:8765/mcp"
+    }
+  }
+}

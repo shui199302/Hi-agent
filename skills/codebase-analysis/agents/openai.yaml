@@ -1,0 +1,4 @@
+interface:
+  display_name: "Codebase Analysis"
+  short_description: "Trace repository behavior to file and line evidence"
+  default_prompt: "Use $codebase-analysis to map this repository and explain the requested behavior with file evidence."

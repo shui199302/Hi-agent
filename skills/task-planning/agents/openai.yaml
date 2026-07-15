@@ -1,0 +1,4 @@
+interface:
+  display_name: "Task Planning"
+  short_description: "Create decision-complete implementation plans"
+  default_prompt: "Use $task-planning to create an implementation-ready plan with tests and acceptance criteria."
