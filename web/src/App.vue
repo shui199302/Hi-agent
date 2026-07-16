@@ -32,7 +32,7 @@ let statusTimer: number | undefined
 const current = computed(() => navigation.find((item) => item.id === active.value) ?? navigation[0])
 
 function syncHash(): void {
-  const id = window.location.hash.replace('#/', '').replace('#', '')
+  const id = window.location.hash.replace('#/', '').replace('#', '').split('/')[0]
   if (navigation.some((item) => item.id === id)) active.value = id
 }
 

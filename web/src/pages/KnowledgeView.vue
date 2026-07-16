@@ -2,6 +2,7 @@
 import { computed, onActivated, onBeforeUnmount, onMounted, reactive, ref } from 'vue'
 import { formatApiError, jsonBody, listOf, openRunEventStream, request } from '../api'
 import AppIcon from '../components/AppIcon.vue'
+import { buildRagMarkdown, buildSearchCsv, safeFilename } from '../downloads'
 import EmptyState from '../components/EmptyState.vue'
 import LoadingState from '../components/LoadingState.vue'
 import ModalDialog from '../components/ModalDialog.vue'
@@ -15,6 +16,7 @@ const knowledgeBases = ref<KnowledgeBase[]>([])
 const allKnowledgeBases = ref<KnowledgeBase[]>([])
 const kbTotal = ref(0)
 const selectedId = ref('')
+const detailId = ref('')
 const activeTab = ref<DetailTab>('overview')
 const loading = ref(true)
 const listLoading = ref(false)
@@ -52,6 +54,7 @@ const qaCitations = ref<Citation[]>([])
 let qaSource: EventSource | null = null
 
 const selected = computed(() => knowledgeBases.value.find((item) => item.id === selectedId.value) ?? allKnowledgeBases.value.find((item) => item.id === selectedId.value) ?? null)
+const isDetail = computed(() => Boolean(detailId.value))
 const ragAgents = computed(() => agents.value.filter((agent) => agent.knowledge_base_id === selectedId.value && agent.enabled !== false && agent.model_endpoint_id))
 const kbPages = computed(() => Math.max(1, Math.ceil(kbTotal.value / kbFilters.limit)))
 const documentPages = computed(() => Math.max(1, Math.ceil(documentTotal.value / documentFilters.limit)))
@@ -102,7 +105,8 @@ async function loadKnowledgeBases(resetSelection = false): Promise<void> {
     knowledgeBases.value = data.items
     kbTotal.value = data.total
     if (kbFilters.page > kbPages.value) { kbFilters.page = kbPages.value; await loadKnowledgeBases(resetSelection); return }
-    if (resetSelection || !selectedId.value || !allKnowledgeBases.value.some((item) => item.id === selectedId.value)) selectedId.value = data.items[0]?.id ?? ''
+    if (detailId.value) selectedId.value = detailId.value
+    else if (resetSelection) selectedId.value = ''
     syncIndexForm()
   } finally { listLoading.value = false }
 }
@@ -118,7 +122,12 @@ async function loadPage(): Promise<void> {
     allKnowledgeBases.value = listOf(allData)
     agents.value = listOf(agentData)
     await loadKnowledgeBases()
-    if (selectedId.value) await loadDocuments()
+    if (detailId.value) {
+      selectedId.value = detailId.value
+      if (!selected.value) throw new Error('知识库不存在或已被删除')
+      syncIndexForm()
+      await loadDocuments()
+    }
   } catch (error) { loadError.value = formatApiError(error) }
   finally { loading.value = false }
 }
@@ -126,19 +135,16 @@ async function loadPage(): Promise<void> {
 async function applyKbFilters(): Promise<void> {
   kbFilters.page = 1
   await loadKnowledgeBases(true)
-  if (selectedId.value) await loadDocuments()
 }
 
 async function clearKbFilters(): Promise<void> {
   Object.assign(kbFilters, { q: '', exact: false, status: 'all', sort_by: 'updated_at', sort_order: 'desc', page: 1 })
   await loadKnowledgeBases(true)
-  if (selectedId.value) await loadDocuments()
 }
 
 async function changeKbPage(page: number): Promise<void> {
   kbFilters.page = Math.min(kbPages.value, Math.max(1, page))
   await loadKnowledgeBases(true)
-  if (selectedId.value) await loadDocuments()
 }
 
 async function loadDocuments(): Promise<void> {
@@ -161,13 +167,32 @@ async function loadDocuments(): Promise<void> {
   finally { documentsLoading.value = false }
 }
 
-async function chooseKnowledgeBase(id: string): Promise<void> {
+async function openKnowledgeBase(id: string): Promise<void> {
+  detailId.value = id
   selectedId.value = id
   activeTab.value = 'overview'
   Object.assign(documentFilters, { q: '', exact: false, status: 'all', sort_by: 'created_at', sort_order: 'desc', page: 1 })
   searchResults.value = []; searched.value = false; qaAnswer.value = ''; qaEvents.value = []
   syncIndexForm()
   await loadDocuments()
+  window.location.hash = `/knowledge/${encodeURIComponent(id)}`
+}
+
+function backToKnowledgeList(): void {
+  detailId.value = ''
+  selectedId.value = ''
+  activeTab.value = 'overview'
+  window.location.hash = '/knowledge'
+}
+
+function syncKnowledgeRoute(): void {
+  const path = window.location.hash.replace(/^#\/?/, '').split('/')
+  const id = path[0] === 'knowledge' && path[1] ? decodeURIComponent(path[1]) : ''
+  if (id === detailId.value) return
+  detailId.value = id
+  selectedId.value = id
+  activeTab.value = 'overview'
+  if (id && !loading.value) void loadPage()
 }
 
 async function applyDocumentFilters(): Promise<void> { documentFilters.page = 1; await loadDocuments() }
@@ -188,7 +213,7 @@ async function createKnowledgeBase(): Promise<void> {
     createOpen.value = false
     Object.assign(createForm, { name: '', description: '', embedding_model: 'BAAI/bge-small-zh-v1.5', chunk_size: 800, chunk_overlap: 120, top_k: 5 })
     notify('知识库已创建', 'success')
-    await refreshData(); await chooseKnowledgeBase(created.id)
+    await refreshData(); await openKnowledgeBase(created.id)
   } catch (error) { notify(formatApiError(error), 'error') }
   finally { creating.value = false }
 }
@@ -213,7 +238,7 @@ async function updateKnowledgeBase(): Promise<void> {
 
 async function deleteKnowledgeBase(): Promise<void> {
   if (!selected.value || !window.confirm(`确认删除知识库“${selected.value.name}”及其全部文档和向量？此操作无法撤销。`)) return
-  try { await request<void>(`/knowledge-bases/${selected.value.id}`, { method: 'DELETE' }); notify('知识库已删除', 'success'); selectedId.value = ''; await refreshData() }
+  try { await request<void>(`/knowledge-bases/${selected.value.id}`, { method: 'DELETE' }); notify('知识库已删除', 'success'); backToKnowledgeList(); await refreshData() }
   catch (error) { notify(formatApiError(error), 'error') }
 }
 
@@ -254,6 +279,33 @@ async function search(): Promise<void> {
   finally { searching.value = false }
 }
 
+function downloadText(filename: string, content: string, type: string): void {
+  const blob = new Blob([content], { type })
+  const url = URL.createObjectURL(blob)
+  const link = document.createElement('a')
+  link.href = url
+  link.download = filename
+  document.body.appendChild(link)
+  link.click()
+  link.remove()
+  window.setTimeout(() => URL.revokeObjectURL(url), 0)
+}
+
+function downloadSearchCsv(): void {
+  if (!selected.value || !searchResults.value.length) return
+  const csv = buildSearchCsv({ knowledgeBase: selected.value.name, query: searchQuery.value, mode: retrievalMode.value, results: searchResults.value })
+  downloadText(`${safeFilename(selected.value.name)}-检索结果.csv`, csv, 'text/csv;charset=utf-8')
+  notify('检索结果 CSV 已下载', 'success')
+}
+
+function downloadRagReport(): void {
+  if (!selected.value || !qaAnswer.value) return
+  const generatedAt = new Intl.DateTimeFormat('zh-CN', { dateStyle: 'long', timeStyle: 'medium' }).format(new Date())
+  const markdown = buildRagMarkdown({ knowledgeBase: selected.value, question: qaQuestion.value, answer: qaAnswer.value, events: qaEvents.value, citations: qaCitations.value, generatedAt })
+  downloadText(`${safeFilename(selected.value.name)}-RAG问答报告.md`, markdown, 'text/markdown;charset=utf-8')
+  notify('RAG Markdown 报告已下载', 'success')
+}
+
 async function rebuildIndex(): Promise<void> {
   if (!selected.value || !window.confirm('确认按新配置重建全部文档索引？重建期间该知识库暂不可检索。')) return
   reindexing.value = true
@@ -280,86 +332,91 @@ async function askRag(): Promise<void> {
   } catch (error) { qaRunning.value = false; notify(formatApiError(error), 'error') }
 }
 
-onMounted(loadPage)
-onActivated(() => { if (!loading.value) void loadPage() })
-onBeforeUnmount(() => qaSource?.close())
+onMounted(() => {
+  syncKnowledgeRoute()
+  window.addEventListener('hashchange', syncKnowledgeRoute)
+  void loadPage()
+})
+onActivated(() => { syncKnowledgeRoute(); if (!loading.value) void loadPage() })
+onBeforeUnmount(() => { qaSource?.close(); window.removeEventListener('hashchange', syncKnowledgeRoute) })
 </script>
 
 <template>
   <div class="page">
     <div class="page-inner">
       <header class="page-header">
-        <div class="page-title-group"><div class="eyebrow">Knowledge workspace · Hybrid RAG</div><h1>知识库管理</h1><p>统一管理知识库、文档处理、向量索引、检索验证与 RAG 问答。</p></div>
-        <div class="page-actions"><button class="button secondary" type="button" @click="loadPage"><AppIcon name="refresh" :size="15" />刷新</button><button class="button" type="button" @click="createOpen = true"><AppIcon name="plus" :size="16" />新建知识库</button></div>
+        <div class="page-title-group">
+          <button v-if="isDetail" class="back-link" type="button" @click="backToKnowledgeList">‹ 返回知识库列表</button>
+          <div class="eyebrow">Knowledge workspace · Hybrid RAG</div>
+          <h1>{{ isDetail ? (selected?.name || '知识库详情') : '知识库列表' }}</h1>
+          <p>{{ isDetail ? '管理知识库内容、文档索引、检索验证与 RAG 问答。' : '查询和浏览全部知识库，点击名称进入内容管理。' }}</p>
+        </div>
+        <div class="page-actions"><button class="button secondary" type="button" @click="loadPage"><AppIcon name="refresh" :size="15" />刷新</button><button v-if="!isDetail" class="button" type="button" @click="createOpen = true"><AppIcon name="plus" :size="16" />新建知识库</button></div>
       </header>
 
       <LoadingState v-if="loading" :rows="4" />
       <EmptyState v-else-if="loadError" icon="alert" title="无法加载知识库" :description="loadError"><button class="button secondary" type="button" @click="loadPage">重新连接</button></EmptyState>
       <template v-else>
-        <section class="metric-grid">
+        <section v-if="!isDetail" class="metric-grid">
           <article><span>知识库</span><strong>{{ allKnowledgeBases.length }}</strong><small>本地可管理空间</small></article>
           <article><span>文档</span><strong>{{ totalDocuments }}</strong><small>已上传文件总数</small></article>
           <article><span>索引分块</span><strong>{{ totalChunks }}</strong><small>Dense + BM25</small></article>
           <article :class="{ warning: failedDocuments }"><span>异常文档</span><strong>{{ failedDocuments }}</strong><small>{{ failedDocuments ? '需要检查解析错误' : '处理链路正常' }}</small></article>
         </section>
 
-        <section class="panel kb-toolbar">
+        <section v-if="!isDetail" class="panel kb-toolbar">
           <form class="filter-search" @submit.prevent="applyKbFilters"><AppIcon name="search" :size="17" /><input v-model="kbFilters.q" placeholder="按名称或说明查询知识库…" /><label class="exact-check"><input v-model="kbFilters.exact" type="checkbox" />精确名称</label><button class="button small" type="submit">查询</button></form>
           <select v-model="kbFilters.status" class="input compact" aria-label="知识库状态" @change="applyKbFilters"><option value="all">全部状态</option><option value="ready">可检索</option><option value="empty">空库</option><option value="processing">处理中</option><option value="error">异常</option></select>
           <select v-model="kbFilters.sort_by" class="input compact" aria-label="排序字段" @change="applyKbFilters"><option value="updated_at">最近更新</option><option value="created_at">创建时间</option><option value="name">名称</option><option value="document_count">文档数量</option></select>
           <button class="button ghost small" type="button" @click="clearKbFilters">重置</button>
         </section>
 
-        <div class="knowledge-layout">
-          <aside class="kb-list panel">
-            <div class="kb-list-head"><span>查询结果</span><strong>{{ kbTotal }}</strong></div>
-            <div v-if="listLoading" class="mini-loading"><span class="spinner" />查询中…</div>
-            <EmptyState v-else-if="!knowledgeBases.length" icon="search" title="没有匹配的知识库" description="可调整查询词或筛选条件。"><button class="button secondary small" @click="clearKbFilters">清除条件</button></EmptyState>
-            <button v-for="kb in knowledgeBases" v-else :key="kb.id" class="kb-item" :class="{ active: selectedId === kb.id }" type="button" @click="chooseKnowledgeBase(kb.id)">
-              <span class="kb-item-icon"><AppIcon name="database" :size="17" /></span><span class="kb-item-copy"><strong>{{ kb.name }}</strong><small>{{ kb.document_count ?? 0 }} 文档 · {{ kb.chunk_count ?? 0 }} 分块</small></span><StatusBadge :status="kb.status || 'empty'" :label="statusLabel(kb.status)" />
-            </button>
-            <footer v-if="kbTotal" class="pager compact-pager"><button :disabled="kbFilters.page <= 1" @click="changeKbPage(kbFilters.page - 1)">‹</button><span>{{ kbFilters.page }} / {{ kbPages }}</span><button :disabled="kbFilters.page >= kbPages" @click="changeKbPage(kbFilters.page + 1)">›</button></footer>
-          </aside>
+        <section v-if="!isDetail" class="panel kb-table-panel">
+          <div class="section-bar"><div><h2>知识库</h2><p>共 {{ kbTotal }} 个结果；名称可点击进入详情</p></div><StatusBadge status="ready" :label="`${kbTotal} 个知识库`" /></div>
+          <div v-if="listLoading" class="mini-loading"><span class="spinner" />查询中…</div>
+          <EmptyState v-else-if="!knowledgeBases.length" icon="search" title="没有匹配的知识库" description="可调整查询词或筛选条件。"><button class="button secondary small" @click="clearKbFilters">清除条件</button></EmptyState>
+          <div v-else class="table-wrap"><table class="data-table knowledge-table"><thead><tr><th>知识库名称</th><th>状态</th><th>文档</th><th>分块</th><th>绑定智能体</th><th>容量</th><th>更新时间</th><th /></tr></thead><tbody><tr v-for="kb in knowledgeBases" :key="kb.id"><td><button class="kb-name-link" type="button" @click="openKnowledgeBase(kb.id)"><span class="kb-link-icon"><AppIcon name="database" :size="16" /></span><span><strong>{{ kb.name }}</strong><small>{{ kb.description || '未填写说明' }}</small></span></button></td><td><StatusBadge :status="kb.status || 'empty'" :label="statusLabel(kb.status)" /></td><td>{{ kb.document_count ?? 0 }}</td><td>{{ kb.chunk_count ?? 0 }}</td><td>{{ kb.bound_agent_count ?? 0 }}</td><td>{{ bytes(kb.total_size_bytes) }}</td><td>{{ date(kb.updated_at) }}</td><td><button class="button ghost small" type="button" @click="openKnowledgeBase(kb.id)">进入管理 <AppIcon name="chevron" :size="13" /></button></td></tr></tbody></table></div>
+          <footer v-if="kbTotal" class="pager"><span>共 {{ kbTotal }} 个知识库</span><div><button :disabled="kbFilters.page <= 1" @click="changeKbPage(kbFilters.page - 1)">上一页</button><b>{{ kbFilters.page }} / {{ kbPages }}</b><button :disabled="kbFilters.page >= kbPages" @click="changeKbPage(kbFilters.page + 1)">下一页</button></div></footer>
+        </section>
 
-          <main v-if="selected" class="kb-content">
-            <section class="panel panel-padded kb-overview">
-              <div><span class="overview-mark"><AppIcon name="database" :size="22" /></span><div><div class="title-line"><h2>{{ selected.name }}</h2><StatusBadge :status="selected.status || 'empty'" :label="statusLabel(selected.status)" /></div><p>{{ selected.description || '未填写说明' }}</p><small>更新于 {{ date(selected.updated_at) }} · ID {{ selected.id }}</small></div></div>
-              <div class="overview-actions"><button class="button secondary small" type="button" @click="openEdit"><AppIcon name="edit" :size="14" />编辑</button><button class="button danger small" type="button" @click="deleteKnowledgeBase"><AppIcon name="trash" :size="14" />删除</button></div>
+        <main v-else-if="selected" class="kb-content">
+          <section class="panel panel-padded kb-overview">
+            <div><span class="overview-mark"><AppIcon name="database" :size="22" /></span><div><div class="title-line"><h2>{{ selected.name }}</h2><StatusBadge :status="selected.status || 'empty'" :label="statusLabel(selected.status)" /></div><p>{{ selected.description || '未填写说明' }}</p><small>更新于 {{ date(selected.updated_at) }} · ID {{ selected.id }}</small></div></div>
+            <div class="overview-actions"><button class="button secondary small" type="button" @click="openEdit"><AppIcon name="edit" :size="14" />编辑</button><button class="button danger small" type="button" @click="deleteKnowledgeBase"><AppIcon name="trash" :size="14" />删除</button></div>
+          </section>
+
+          <nav class="detail-tabs panel" aria-label="知识库功能">
+            <button v-for="tab in ([['overview','概览'],['documents','文档'],['retrieval','索引与检索'],['rag','RAG 问答']] as const)" :key="tab[0]" :class="{ active: activeTab === tab[0] }" @click="activeTab = tab[0]">{{ tab[1] }}<span v-if="tab[0] === 'documents'">{{ selected.document_count ?? 0 }}</span></button>
+          </nav>
+
+          <template v-if="activeTab === 'overview'">
+            <section class="summary-grid">
+              <article class="panel"><span>文档处理</span><strong>{{ selected.ready_document_count ?? 0 }} / {{ selected.document_count ?? 0 }}</strong><small>可检索 / 全部</small></article>
+              <article class="panel"><span>索引分块</span><strong>{{ selected.chunk_count ?? 0 }}</strong><small>平均 {{ selected.document_count ? Math.round((selected.chunk_count ?? 0) / selected.document_count) : 0 }} 块/文档</small></article>
+              <article class="panel"><span>存储容量</span><strong>{{ bytes(selected.total_size_bytes) }}</strong><small>原始文档大小</small></article>
+              <article class="panel"><span>绑定智能体</span><strong>{{ selected.bound_agent_count ?? 0 }}</strong><small>使用此知识库</small></article>
             </section>
+            <section class="panel upload-section"><div class="drop-zone" :class="{ dragging, busy: uploadBusy }" @dragenter.prevent="dragging = true" @dragover.prevent @dragleave.prevent="dragging = false" @drop.prevent="dropped"><span v-if="uploadBusy" class="spinner" /><span v-else class="upload-icon"><AppIcon name="upload" :size="21" /></span><div><strong>{{ uploadBusy ? '正在解析并索引文档…' : '上传资料到知识库' }}</strong><span>支持 PDF、DOCX、Markdown、TXT；按 SHA-256 去重；单文件不超过 50 MB</span></div><button v-if="!uploadBusy" class="button secondary small" type="button" @click="fileInput?.click()">选择文件</button><input ref="fileInput" type="file" hidden multiple accept=".pdf,.docx,.md,.markdown,.txt" @change="($event.target as HTMLInputElement).files && upload(($event.target as HTMLInputElement).files!)" /></div></section>
+            <section class="panel panel-padded flow-card"><div class="section-heading"><div><h2>处理流程</h2><p>从原始文档到可验证引用的完整状态</p></div><StatusBadge :status="selected.status || 'empty'" :label="statusLabel(selected.status)" /></div><div class="rag-flow"><span>上传与去重</span><i>→</i><span>解析清洗</span><i>→</i><span>Token 分块</span><i>→</i><span>向量嵌入</span><i>→</i><span>Qdrant / BM25</span><i>→</i><span>可引用检索</span></div></section>
+          </template>
 
-            <nav class="detail-tabs panel" aria-label="知识库功能">
-              <button v-for="tab in ([['overview','概览'],['documents','文档'],['retrieval','索引与检索'],['rag','RAG 问答']] as const)" :key="tab[0]" :class="{ active: activeTab === tab[0] }" @click="activeTab = tab[0]">{{ tab[1] }}<span v-if="tab[0] === 'documents'">{{ selected.document_count ?? 0 }}</span></button>
-            </nav>
+          <section v-else-if="activeTab === 'documents'" class="panel">
+            <div class="section-bar"><div><h2>文档管理</h2><p>按文件名查询、精确查找、筛选处理状态并查看索引结果</p></div><StatusBadge status="indexed" :label="`${documentTotal} 个文件`" /></div>
+            <div class="document-toolbar"><form class="filter-search" @submit.prevent="applyDocumentFilters"><AppIcon name="search" :size="16" /><input v-model="documentFilters.q" placeholder="查询文件名…" /><label class="exact-check"><input v-model="documentFilters.exact" type="checkbox" />精确文件名</label><button class="button small">查询</button></form><select v-model="documentFilters.status" class="input compact" @change="applyDocumentFilters"><option value="all">全部状态</option><option value="ready">可检索</option><option value="indexed">已索引</option><option value="processing">处理中</option><option value="failed">异常</option></select><select v-model="documentFilters.sort_by" class="input compact" @change="applyDocumentFilters"><option value="created_at">最近添加</option><option value="filename">文件名</option><option value="size_bytes">文件大小</option><option value="chunk_count">分块数量</option></select></div>
+            <LoadingState v-if="documentsLoading" :rows="2" />
+            <EmptyState v-else-if="documents.length === 0" icon="file" title="没有匹配的文档" description="上传新文档，或调整文件名和状态条件。" />
+            <div v-else class="table-wrap"><table class="data-table document-table"><thead><tr><th>文件</th><th>大小</th><th>分块</th><th>状态</th><th>添加时间</th><th /></tr></thead><tbody><tr v-for="document in documents" :key="document.id"><td><span class="file-cell"><i><AppIcon name="file" :size="16" /></i><span><strong>{{ document.filename }}</strong><small>{{ document.error || document.media_type || document.filename.split('.').pop()?.toUpperCase() }}</small></span></span></td><td>{{ bytes(document.size_bytes ?? document.size) }}</td><td>{{ document.chunk_count ?? '—' }}</td><td><StatusBadge :status="document.status || 'indexed'" /></td><td>{{ date(document.created_at) }}</td><td><button class="icon-button delete-document" type="button" aria-label="删除文档" @click="deleteDocument(document)"><AppIcon name="trash" :size="15" /></button></td></tr></tbody></table></div>
+            <footer v-if="documentTotal" class="pager"><span>共 {{ documentTotal }} 个文档</span><div><button :disabled="documentFilters.page <= 1" @click="changeDocumentPage(documentFilters.page - 1)">上一页</button><b>{{ documentFilters.page }} / {{ documentPages }}</b><button :disabled="documentFilters.page >= documentPages" @click="changeDocumentPage(documentFilters.page + 1)">下一页</button></div></footer>
+          </section>
 
-            <template v-if="activeTab === 'overview'">
-              <section class="summary-grid">
-                <article class="panel"><span>文档处理</span><strong>{{ selected.ready_document_count ?? 0 }} / {{ selected.document_count ?? 0 }}</strong><small>可检索 / 全部</small></article>
-                <article class="panel"><span>索引分块</span><strong>{{ selected.chunk_count ?? 0 }}</strong><small>平均 {{ selected.document_count ? Math.round((selected.chunk_count ?? 0) / selected.document_count) : 0 }} 块/文档</small></article>
-                <article class="panel"><span>存储容量</span><strong>{{ bytes(selected.total_size_bytes) }}</strong><small>原始文档大小</small></article>
-                <article class="panel"><span>绑定智能体</span><strong>{{ selected.bound_agent_count ?? 0 }}</strong><small>使用此知识库</small></article>
-              </section>
-              <section class="panel upload-section"><div class="drop-zone" :class="{ dragging, busy: uploadBusy }" @dragenter.prevent="dragging = true" @dragover.prevent @dragleave.prevent="dragging = false" @drop.prevent="dropped"><span v-if="uploadBusy" class="spinner" /><span v-else class="upload-icon"><AppIcon name="upload" :size="21" /></span><div><strong>{{ uploadBusy ? '正在解析并索引文档…' : '上传资料到知识库' }}</strong><span>支持 PDF、DOCX、Markdown、TXT；按 SHA-256 去重；单文件不超过 50 MB</span></div><button v-if="!uploadBusy" class="button secondary small" type="button" @click="fileInput?.click()">选择文件</button><input ref="fileInput" type="file" hidden multiple accept=".pdf,.docx,.md,.markdown,.txt" @change="($event.target as HTMLInputElement).files && upload(($event.target as HTMLInputElement).files!)" /></div></section>
-              <section class="panel panel-padded flow-card"><div class="section-heading"><div><h2>处理流程</h2><p>从原始文档到可验证引用的完整状态</p></div><StatusBadge :status="selected.status || 'empty'" :label="statusLabel(selected.status)" /></div><div class="rag-flow"><span>上传与去重</span><i>→</i><span>解析清洗</span><i>→</i><span>Token 分块</span><i>→</i><span>向量嵌入</span><i>→</i><span>Qdrant / BM25</span><i>→</i><span>可引用检索</span></div></section>
-            </template>
+          <template v-else-if="activeTab === 'retrieval'">
+            <section class="panel panel-padded index-config"><div class="section-heading"><div><h2>向量索引配置</h2><p>索引参数与知识库信息分离管理；保存后重建全部文档</p></div><StatusBadge status="ready" label="HYBRID" /></div><div class="config-grid"><div class="field wide"><label>嵌入模型</label><input v-model="indexForm.embedding_model" class="input" /></div><div class="field"><label>分块 Token</label><input v-model.number="indexForm.chunk_size" class="input" type="number" min="100" max="4000" /></div><div class="field"><label>重叠 Token</label><input v-model.number="indexForm.chunk_overlap" class="input" type="number" min="0" max="1000" /></div><div class="field"><label>Top K</label><input v-model.number="indexForm.top_k" class="input" type="number" min="1" max="50" /></div><button class="button secondary" :disabled="reindexing" type="button" @click="rebuildIndex">{{ reindexing ? '正在重建…' : '保存并重建' }}</button></div></section>
+            <section class="panel panel-padded search-panel"><div class="section-heading"><div><h2>检索试验台</h2><p>检查召回通道、融合分数与原始片段，不调用大语言模型</p></div><div class="heading-actions"><select v-model="retrievalMode" class="input mode-select"><option value="hybrid">混合检索</option><option value="dense">语义向量</option><option value="lexical">BM25 关键词</option></select><button class="button secondary small" type="button" :disabled="!searchResults.length" @click="downloadSearchCsv"><AppIcon name="download" :size="14" />下载查询结果</button></div></div><form class="search-box" @submit.prevent="search"><AppIcon name="search" :size="18" /><input v-model="searchQuery" placeholder="输入问题，检查知识库召回…" /><button class="button small" type="submit" :disabled="searching || !searchQuery.trim()">{{ searching ? '检索中…' : '检索' }}</button></form><div v-if="searching" class="search-loading"><span class="spinner" /> 正在计算查询向量…</div><EmptyState v-else-if="searched && searchResults.length === 0" icon="search" title="没有找到相关片段" description="可以换一种问法，或确认文档索引已完成。" /><div v-else-if="searchResults.length" class="result-list"><article v-for="(result, index) in searchResults" :key="`${result.document_id}-${result.chunk_index}`" class="result-card"><span class="result-rank">{{ String(index + 1).padStart(2, '0') }}</span><div><header><strong>{{ result.filename }}</strong><span>块 {{ result.chunk_index }}<template v-if="result.page"> · 第 {{ result.page }} 页</template> · {{ result.channels?.join(' + ') || retrievalMode }}</span><em>{{ (result.score * 100).toFixed(1) }}%</em></header><p>{{ result.content }}</p></div></article></div></section>
+          </template>
 
-            <section v-else-if="activeTab === 'documents'" class="panel">
-              <div class="section-bar"><div><h2>文档管理</h2><p>按文件名查询、精确查找、筛选处理状态并查看索引结果</p></div><StatusBadge status="indexed" :label="`${documentTotal} 个文件`" /></div>
-              <div class="document-toolbar"><form class="filter-search" @submit.prevent="applyDocumentFilters"><AppIcon name="search" :size="16" /><input v-model="documentFilters.q" placeholder="查询文件名…" /><label class="exact-check"><input v-model="documentFilters.exact" type="checkbox" />精确文件名</label><button class="button small">查询</button></form><select v-model="documentFilters.status" class="input compact" @change="applyDocumentFilters"><option value="all">全部状态</option><option value="ready">可检索</option><option value="indexed">已索引</option><option value="processing">处理中</option><option value="failed">异常</option></select><select v-model="documentFilters.sort_by" class="input compact" @change="applyDocumentFilters"><option value="created_at">最近添加</option><option value="filename">文件名</option><option value="size_bytes">文件大小</option><option value="chunk_count">分块数量</option></select></div>
-              <LoadingState v-if="documentsLoading" :rows="2" />
-              <EmptyState v-else-if="documents.length === 0" icon="file" title="没有匹配的文档" description="上传新文档，或调整文件名和状态条件。" />
-              <div v-else class="table-wrap"><table class="data-table document-table"><thead><tr><th>文件</th><th>大小</th><th>分块</th><th>状态</th><th>添加时间</th><th /></tr></thead><tbody><tr v-for="document in documents" :key="document.id"><td><span class="file-cell"><i><AppIcon name="file" :size="16" /></i><span><strong>{{ document.filename }}</strong><small>{{ document.error || document.media_type || document.filename.split('.').pop()?.toUpperCase() }}</small></span></span></td><td>{{ bytes(document.size_bytes ?? document.size) }}</td><td>{{ document.chunk_count ?? '—' }}</td><td><StatusBadge :status="document.status || 'indexed'" /></td><td>{{ date(document.created_at) }}</td><td><button class="icon-button delete-document" type="button" aria-label="删除文档" @click="deleteDocument(document)"><AppIcon name="trash" :size="15" /></button></td></tr></tbody></table></div>
-              <footer v-if="documentTotal" class="pager"><span>共 {{ documentTotal }} 个文档</span><div><button :disabled="documentFilters.page <= 1" @click="changeDocumentPage(documentFilters.page - 1)">上一页</button><b>{{ documentFilters.page }} / {{ documentPages }}</b><button :disabled="documentFilters.page >= documentPages" @click="changeDocumentPage(documentFilters.page + 1)">下一页</button></div></footer>
-            </section>
-
-            <template v-else-if="activeTab === 'retrieval'">
-              <section class="panel panel-padded index-config"><div class="section-heading"><div><h2>向量索引配置</h2><p>索引参数与知识库信息分离管理；保存后重建全部文档</p></div><StatusBadge status="ready" label="HYBRID" /></div><div class="config-grid"><div class="field wide"><label>嵌入模型</label><input v-model="indexForm.embedding_model" class="input" /></div><div class="field"><label>分块 Token</label><input v-model.number="indexForm.chunk_size" class="input" type="number" min="100" max="4000" /></div><div class="field"><label>重叠 Token</label><input v-model.number="indexForm.chunk_overlap" class="input" type="number" min="0" max="1000" /></div><div class="field"><label>Top K</label><input v-model.number="indexForm.top_k" class="input" type="number" min="1" max="50" /></div><button class="button secondary" :disabled="reindexing" type="button" @click="rebuildIndex">{{ reindexing ? '正在重建…' : '保存并重建' }}</button></div></section>
-              <section class="panel panel-padded search-panel"><div class="section-heading"><div><h2>检索试验台</h2><p>检查召回通道、融合分数与原始片段，不调用大语言模型</p></div><select v-model="retrievalMode" class="input mode-select"><option value="hybrid">混合检索</option><option value="dense">语义向量</option><option value="lexical">BM25 关键词</option></select></div><form class="search-box" @submit.prevent="search"><AppIcon name="search" :size="18" /><input v-model="searchQuery" placeholder="输入问题，检查知识库召回…" /><button class="button small" type="submit" :disabled="searching || !searchQuery.trim()">{{ searching ? '检索中…' : '检索' }}</button></form><div v-if="searching" class="search-loading"><span class="spinner" /> 正在计算查询向量…</div><EmptyState v-else-if="searched && searchResults.length === 0" icon="search" title="没有找到相关片段" description="可以换一种问法，或确认文档索引已完成。" /><div v-else-if="searchResults.length" class="result-list"><article v-for="(result, index) in searchResults" :key="`${result.document_id}-${result.chunk_index}`" class="result-card"><span class="result-rank">{{ String(index + 1).padStart(2, '0') }}</span><div><header><strong>{{ result.filename }}</strong><span>块 {{ result.chunk_index }}<template v-if="result.page"> · 第 {{ result.page }} 页</template> · {{ result.channels?.join(' + ') || retrievalMode }}</span><em>{{ (result.score * 100).toFixed(1) }}%</em></header><p>{{ result.content }}</p></div></article></div></section>
-            </template>
-
-            <section v-else class="panel panel-padded rag-lab"><div class="section-heading"><div><h2>RAG 问答实验台</h2><p>运行检索、上下文组装、模型生成与引用持久化的完整链路</p></div><StatusBadge :status="qaRunning ? 'running' : 'ready'" :label="qaRunning ? '运行中' : '可观测'" /></div><div class="rag-flow"><span>问题分析</span><i>→</i><span>Dense / BM25</span><i>→</i><span>RRF 融合</span><i>→</i><span>上下文注入</span><i>→</i><span>LLM 生成</span><i>→</i><span>引用核验</span></div><form class="search-box" @submit.prevent="askRag"><AppIcon name="chat" :size="18" /><input v-model="qaQuestion" placeholder="输入需要依据知识库回答的问题…" /><button class="button small" :disabled="qaRunning || !qaQuestion.trim() || !ragAgents.length" type="submit">{{ qaRunning ? '生成中…' : '开始 RAG 问答' }}</button></form><p v-if="!ragAgents.length" class="lab-warning">请先配置一个绑定此知识库且已设置模型端点的智能体。</p><div v-if="qaEvents.length" class="qa-timeline"><span v-for="event in qaEvents.filter((item) => item.type !== 'model_delta')" :key="String(event.id)">{{ event.type }}</span></div><article v-if="qaAnswer" class="qa-answer"><h3>模型回答</h3><p>{{ qaAnswer }}</p><footer v-if="qaCitations.length"><span v-for="citation in qaCitations" :key="`${citation.document_id}-${citation.chunk_index}`">{{ citation.filename }} · 块 {{ citation.chunk_index }}<template v-if="citation.page"> · 第 {{ citation.page }} 页</template></span></footer></article></section>
-          </main>
-          <EmptyState v-else class="panel" icon="database" title="选择一个知识库" description="从左侧查询结果选择，或新建知识库。" />
-        </div>
+          <section v-else class="panel panel-padded rag-lab"><div class="section-heading"><div><h2>RAG 问答实验台</h2><p>运行检索、上下文组装、模型生成与引用持久化的完整链路</p></div><div class="heading-actions"><StatusBadge :status="qaRunning ? 'running' : 'ready'" :label="qaRunning ? '运行中' : '可观测'" /><button class="button secondary small" type="button" :disabled="!qaAnswer" @click="downloadRagReport"><AppIcon name="download" :size="14" />下载报告</button></div></div><div class="rag-flow"><span>问题分析</span><i>→</i><span>Dense / BM25</span><i>→</i><span>RRF 融合</span><i>→</i><span>上下文注入</span><i>→</i><span>LLM 生成</span><i>→</i><span>引用核验</span></div><form class="search-box" @submit.prevent="askRag"><AppIcon name="chat" :size="18" /><input v-model="qaQuestion" placeholder="输入需要依据知识库回答的问题…" /><button class="button small" :disabled="qaRunning || !qaQuestion.trim() || !ragAgents.length" type="submit">{{ qaRunning ? '生成中…' : '开始 RAG 问答' }}</button></form><p v-if="!ragAgents.length" class="lab-warning">请先配置一个绑定此知识库且已设置模型端点的智能体。</p><div v-if="qaEvents.length" class="qa-timeline"><span v-for="event in qaEvents.filter((item) => item.type !== 'model_delta')" :key="String(event.id)">{{ event.type }}</span></div><article v-if="qaAnswer" class="qa-answer"><h3>模型回答</h3><p>{{ qaAnswer }}</p><footer v-if="qaCitations.length"><span v-for="citation in qaCitations" :key="`${citation.document_id}-${citation.chunk_index}`">{{ citation.filename }} · 块 {{ citation.chunk_index }}<template v-if="citation.page"> · 第 {{ citation.page }} 页</template></span></footer></article></section>
+        </main>
+        <EmptyState v-else-if="isDetail" class="panel" icon="alert" title="知识库不存在" description="该知识库可能已被删除。"><button class="button secondary" @click="backToKnowledgeList">返回列表</button></EmptyState>
       </template>
     </div>
 
@@ -375,6 +432,9 @@ onBeforeUnmount(() => qaSource?.close())
 .kb-toolbar,.document-toolbar { display:flex; align-items:center; gap:8px; padding:10px; margin-bottom:14px; }
 .filter-search { display:flex; min-width:260px; flex:1; align-items:center; gap:8px; padding:5px 5px 5px 10px; color:var(--muted); background:#f8f9f5; border:1px solid var(--line-strong); border-radius:10px; }
 .filter-search:focus-within { background:#fff; border-color:#70a98d; box-shadow:0 0 0 3px rgba(31,115,84,.07); }.filter-search > input:not([type=checkbox]) { min-width:90px; flex:1; padding:5px; background:transparent; border:0; outline:0; }.exact-check { display:flex; align-items:center; gap:4px; color:var(--muted); font-size:9px; white-space:nowrap; }.compact { width:auto; min-width:112px; }
+.back-link { align-self:flex-start; margin:0 0 8px; padding:0; color:var(--green); font-size:10px; background:transparent; border:0; cursor:pointer; }.back-link:hover { text-decoration:underline; }
+.kb-table-panel { overflow:hidden; }.knowledge-table th,.knowledge-table td { white-space:nowrap; }.knowledge-table td:first-child { width:38%; white-space:normal; }.kb-name-link { display:flex; width:100%; min-width:250px; align-items:center; gap:10px; padding:2px; color:#1769aa; text-align:left; background:transparent; border:0; cursor:pointer; }.kb-name-link:hover strong { text-decoration:underline; }.kb-name-link > span:last-child { display:flex; min-width:0; flex-direction:column; }.kb-name-link strong { overflow:hidden; color:#1769aa; font-size:11px; text-overflow:ellipsis; white-space:nowrap; }.kb-name-link small { display:block; max-width:440px; margin-top:3px; overflow:hidden; color:var(--muted); font-size:8px; text-overflow:ellipsis; white-space:nowrap; }.kb-link-icon { display:grid; width:32px; height:32px; flex:0 0 32px; place-items:center; color:#1769aa; background:#edf6fc; border-radius:8px; }
+.heading-actions { display:flex; align-items:center; gap:8px; }
 .knowledge-layout { display:grid; grid-template-columns:285px minmax(0,1fr); gap:15px; align-items:start; }.kb-list { position:sticky; top:20px; overflow:hidden; padding:8px; }.kb-list-head { display:flex; align-items:center; justify-content:space-between; padding:9px 8px 11px; color:var(--muted); font-size:10px; }.kb-list-head strong { display:grid; min-width:21px; height:21px; place-items:center; color:var(--green); font:9px 'DM Mono',monospace; background:var(--green-soft); border-radius:7px; }
 .kb-item { display:flex; width:100%; align-items:center; gap:8px; padding:9px; color:var(--muted); text-align:left; background:transparent; border:1px solid transparent; border-radius:10px; cursor:pointer; }.kb-item:hover { background:#f7f8f4; }.kb-item.active { color:var(--ink); background:var(--green-soft); border-color:#d8eade; }.kb-item-icon { display:grid; width:31px; height:31px; flex:0 0 31px; place-items:center; color:var(--green); background:#fff; border-radius:8px; }.kb-item-copy { display:flex; min-width:0; flex:1; flex-direction:column; }.kb-item-copy strong { overflow:hidden; font-size:10px; text-overflow:ellipsis; white-space:nowrap; }.kb-item-copy small { margin-top:3px; color:var(--muted); font-size:8px; }.kb-item :deep(.status-badge) { font-size:7px; }
 .mini-loading { display:flex; align-items:center; justify-content:center; gap:8px; min-height:90px; color:var(--muted); font-size:9px; }.mini-loading .spinner { width:16px; height:16px; margin:0; }.kb-content { display:grid; min-width:0; gap:14px; }
@@ -387,8 +447,8 @@ onBeforeUnmount(() => qaSource?.close())
 .file-cell { display:flex; min-width:190px; align-items:center; gap:9px; }.file-cell i { display:grid; width:30px; height:30px; flex:0 0 30px; place-items:center; color:var(--green); background:var(--green-soft); border-radius:8px; }.file-cell > span { display:flex; min-width:0; max-width:290px; flex-direction:column; }.file-cell strong { overflow:hidden; font-size:10px; text-overflow:ellipsis; white-space:nowrap; }.file-cell small { overflow:hidden; margin-top:2px; color:var(--faint); font:7px 'DM Mono',monospace; text-overflow:ellipsis; white-space:nowrap; }.delete-document:hover { color:var(--red); background:var(--red-soft); }
 .search-box { display:flex; align-items:center; gap:9px; padding:7px 7px 7px 11px; color:var(--muted); background:#f8f9f5; border:1px solid var(--line-strong); border-radius:11px; }.search-box:focus-within { background:#fff; border-color:#70a98d; box-shadow:0 0 0 3px rgba(31,115,84,.07); }.search-box input { min-width:0; flex:1; padding:4px; background:transparent; border:0; outline:none; }.search-loading { display:flex; min-height:100px; align-items:center; justify-content:center; gap:10px; color:var(--muted); font-size:10px; }.search-loading .spinner { width:17px; height:17px; margin:0; }.result-list { display:grid; gap:8px; margin-top:13px; }.result-card { display:grid; grid-template-columns:31px minmax(0,1fr); gap:10px; padding:12px; background:#fafbf8; border:1px solid var(--line); border-radius:10px; }.result-rank { display:grid; width:29px; height:29px; place-items:center; color:var(--green); font:8px 'DM Mono',monospace; background:var(--green-soft); border-radius:8px; }.result-card header { display:flex; min-width:0; align-items:center; gap:8px; }.result-card header strong { overflow:hidden; font-size:10px; text-overflow:ellipsis; white-space:nowrap; }.result-card header span { color:var(--faint); font-size:8px; white-space:nowrap; }.result-card header em { margin-left:auto; color:var(--green); font:8px 'DM Mono',monospace; font-style:normal; }.result-card p { margin:7px 0 0; color:#565c55; font-size:10px; line-height:1.65; white-space:pre-wrap; }
 .pager { display:flex; align-items:center; justify-content:space-between; padding:11px 16px; color:var(--muted); font-size:9px; border-top:1px solid var(--line); }.pager div,.compact-pager { display:flex; align-items:center; gap:7px; }.pager button { min-height:27px; padding:4px 9px; color:var(--ink); font-size:9px; background:#fff; border:1px solid var(--line-strong); border-radius:7px; cursor:pointer; }.pager button:disabled { cursor:not-allowed; opacity:.4; }.pager b { font:8px 'DM Mono',monospace; }.compact-pager { justify-content:center; margin-top:6px; padding:8px 3px 3px; }.compact-pager span { min-width:45px; text-align:center; }
-@media (max-width:1050px) { .metric-grid,.summary-grid { grid-template-columns:1fr 1fr; }.kb-toolbar,.document-toolbar { flex-wrap:wrap; }.filter-search { flex-basis:100%; } }
+@media (max-width:1050px) { .metric-grid,.summary-grid { grid-template-columns:1fr 1fr; }.kb-toolbar,.document-toolbar { flex-wrap:wrap; }.filter-search { flex-basis:100%; }.knowledge-table th:nth-child(5),.knowledge-table td:nth-child(5),.knowledge-table th:nth-child(6),.knowledge-table td:nth-child(6) { display:none; } }
 @media (max-width:920px) { .knowledge-layout { grid-template-columns:1fr; }.kb-list { position:static; }.kb-item { display:inline-flex; width:calc(50% - 3px); }.kb-item:nth-of-type(even) { margin-left:6px; } }
 @media (max-width:760px) { .config-grid { grid-template-columns:1fr 1fr; }.config-grid .wide { grid-column:1/-1; }.config-grid .button { grid-column:1/-1; }.detail-tabs { overflow-x:auto; }.detail-tabs button { min-width:100px; }.kb-overview { align-items:flex-start; }.overview-actions { flex-direction:column; } }
-@media (max-width:600px) { .metric-grid,.summary-grid { grid-template-columns:1fr 1fr; }.kb-item { width:100%; }.kb-item:nth-of-type(even) { margin-left:0; }.exact-check { display:none; }.drop-zone { align-items:flex-start; flex-wrap:wrap; }.drop-zone .button { margin-left:52px; }.document-table th:nth-child(2),.document-table td:nth-child(2),.document-table th:nth-child(5),.document-table td:nth-child(5) { display:none; } }
+@media (max-width:600px) { .metric-grid,.summary-grid { grid-template-columns:1fr 1fr; }.kb-item { width:100%; }.kb-item:nth-of-type(even) { margin-left:0; }.exact-check { display:none; }.heading-actions { align-items:flex-end; flex-direction:column; }.drop-zone { align-items:flex-start; flex-wrap:wrap; }.drop-zone .button { margin-left:52px; }.document-table th:nth-child(2),.document-table td:nth-child(2),.document-table th:nth-child(5),.document-table td:nth-child(5),.knowledge-table th:nth-child(3),.knowledge-table td:nth-child(3),.knowledge-table th:nth-child(4),.knowledge-table td:nth-child(4),.knowledge-table th:nth-child(7),.knowledge-table td:nth-child(7) { display:none; } }
 </style>

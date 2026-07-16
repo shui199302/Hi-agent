@@ -47,6 +47,9 @@ withDefaults(defineProps<{ name: string; size?: number }>(), { size: 20 })
     <template v-else-if="name === 'upload'">
       <path d="M12 16V4M7 9l5-5 5 5M4 20h16" />
     </template>
+    <template v-else-if="name === 'download'">
+      <path d="M12 4v12M7 11l5 5 5-5M4 20h16" />
+    </template>
     <template v-else-if="name === 'trash'">
       <path d="M4 7h16M9 7V4h6v3M6 7l1 13h10l1-13M10 11v5M14 11v5" />
     </template>
