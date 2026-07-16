@@ -1,10 +1,10 @@
-# Default summary outline
+# 默认摘要结构
 
-1. **一句话结论** — the central point without embellishment.
-2. **关键内容** — three to seven source-backed points.
-3. **重要事实** — decisions, dates, quantities, owners, and obligations.
-4. **风险与限制** — conditions, uncertainty, omissions, and conflicting evidence.
-5. **待确认事项** — questions the source leaves unresolved.
-6. **来源** — compact source references in first-appearance order.
+1. **一句话结论** — 不加修饰地概括核心观点。
+2. **关键内容** — 列出三至七项有原文支持的要点。
+3. **重要事实** — 提取决策、日期、数量、负责人和义务。
+4. **风险与限制** — 说明适用条件、不确定性、遗漏和冲突证据。
+5. **待确认事项** — 列出原文尚未解决的问题。
+6. **来源** — 按首次出现顺序简洁列出来源引用。
 
-For a long document, add section headings matching the original hierarchy. For a comparison, use aligned dimensions rather than alternating prose summaries.
+处理长文档时，增加与原文层级对应的章节标题。处理对比任务时，使用对齐的比较维度，不要交替堆叠多段摘要。

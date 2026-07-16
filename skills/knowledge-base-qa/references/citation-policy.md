@@ -1,11 +1,11 @@
-# Citation policy
+# 引用策略
 
-Use inline citations in this form: `[filename, p.12, chunk 4]`. Omit the page only when the parser did not provide one: `[filename, chunk 4]`.
+行内引用采用 `[文件名, 第12页, 块4]` 格式。仅当解析器没有提供页码时省略页码：`[文件名, 块4]`。
 
-- Attach a citation to the sentence or paragraph it supports.
-- Cite the source metadata returned by retrieval; never calculate page or chunk identifiers.
-- Use multiple citations when a conclusion combines sources.
-- Describe conflicting sources separately, including dates or versions when available.
-- Prefer the more authoritative and current source, but identify that choice as an assessment.
-- Paraphrase by default. Quote only short passages needed to preserve exact wording.
-- Return “知识库中没有足够证据” when retrieval is empty or irrelevant.
+- 将引用紧邻其支持的句子或段落。
+- 使用检索结果返回的来源元数据；不得自行计算页码或块编号。
+- 结论综合多个来源时使用多个引用。
+- 分别描述相互冲突的来源，并在可获得时注明日期或版本。
+- 优先采用更权威、更新的来源，但应明确这是分析判断。
+- 默认使用转述。仅在必须保留准确措辞时引用短句。
+- 检索为空或不相关时，返回“知识库中没有足够证据”。

@@ -1,18 +1,18 @@
 ---
 name: codebase-analysis
-description: "Analyze an existing codebase without changing it, tracing architecture and behavior to file-and-line evidence. Use for repository orientation, dependency mapping, implementation discovery, bug-cause investigation, data-flow tracing, security review, or estimating the impact of a proposed change."
+description: "在不修改代码的前提下分析现有代码库，并把架构与行为追溯到具体文件和行号证据。适用于仓库梳理、依赖映射、实现定位、故障根因调查、数据流追踪、安全审查和变更影响评估。"
 ---
 
-# Codebase Analysis
+# 代码库分析
 
-## Workflow
+## 工作流程
 
-1. Read repository instructions and manifests first. Identify languages, entry points, generated files, and test layout.
-2. Use targeted filename and symbol searches. Avoid broad dumps of vendor, build, cache, or secret-bearing directories.
-3. Trace the requested path from boundary to state change and output, including configuration and error handling.
-4. Compare implementation with tests and public interfaces. Distinguish observed behavior from hypothesis.
-5. Report findings with clickable `path:line` evidence, affected callers, and uncertainty.
+1. 先阅读仓库说明和清单文件，识别语言、入口点、生成文件和测试结构。
+2. 有针对性地搜索文件名与符号，避免笼统导出依赖、构建、缓存或可能含密钥的目录。
+3. 从系统边界追踪到状态变更和输出，同时覆盖配置与错误处理。
+4. 将实现与测试、公共接口对照，明确区分已观察事实和推测。
+5. 使用可点击的 `路径:行号` 证据报告结论，并说明受影响调用方和不确定性。
 
-Stay read-only. Do not reveal secret values found in configuration; mention only the variable name and location. Do not execute repository scripts merely to understand them. Request approval before any command that can modify data or contact external systems.
+保持只读。不得泄露配置中发现的密钥值，只能说明变量名和位置。不得仅为理解代码而执行仓库脚本。任何可能修改数据或访问外部系统的命令都必须先取得批准。
 
-Read [references/evidence-checklist.md](references/evidence-checklist.md) before presenting a causal or security conclusion.
+在给出因果或安全结论前，阅读 [references/evidence-checklist.md](references/evidence-checklist.md)。

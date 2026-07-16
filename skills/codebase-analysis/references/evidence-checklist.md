@@ -1,11 +1,11 @@
-# Evidence checklist
+# 证据检查清单
 
-Before reporting a conclusion, confirm:
+报告结论前确认：
 
-- The referenced code is reachable from an actual entry point or explicitly identified as dormant.
-- Configuration defaults and environment overrides are accounted for.
-- Async, retry, caching, and persistence boundaries are included in the trace.
-- Tests support the interpretation or their absence is noted.
-- Generated and third-party code is not mistaken for project-owned behavior.
-- A suspected defect has a concrete trigger, observable effect, and tight location.
-- Security impact separates capability, exploit preconditions, and user-controlled input.
+- 引用的代码可从真实入口到达，或已明确标记为未启用代码。
+- 已考虑配置默认值和环境变量覆盖。
+- 调用链分析包含异步、重试、缓存和持久化边界。
+- 测试能够支持分析结论；若缺少测试，已明确说明。
+- 未将生成代码或第三方代码误判为项目自身行为。
+- 疑似缺陷具有明确触发条件、可观测影响和精确位置。
+- 安全影响已区分系统能力、利用前提和用户可控输入。

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Safely profile a CSV/TSV file without executing or modifying its contents."""
+"""在不执行或修改文件内容的前提下，安全分析 CSV/TSV 文件。"""
 
 from __future__ import annotations
 
@@ -23,13 +23,13 @@ def safe_input(path_text: str, root_text: str) -> Path:
         candidate = root / candidate
     candidate = candidate.resolve(strict=True)
     if candidate != root and root not in candidate.parents:
-        raise ValueError("input path escapes the approved root")
+        raise ValueError("输入路径超出已批准的根目录")
     if candidate.suffix.lower() not in {".csv", ".tsv"}:
-        raise ValueError("only .csv and .tsv inputs are accepted")
+        raise ValueError("仅接受 .csv 和 .tsv 输入文件")
     if not candidate.is_file() or candidate.is_symlink():
-        raise ValueError("input must be a regular, non-symlink file")
+        raise ValueError("输入必须是普通文件，不能是符号链接")
     if candidate.stat().st_size > MAX_BYTES:
-        raise ValueError(f"input exceeds {MAX_BYTES} bytes")
+        raise ValueError(f"输入文件超过 {MAX_BYTES} 字节限制")
     return candidate
 
 
@@ -47,11 +47,11 @@ def profile(path: Path, max_rows: int) -> dict[str, Any]:
         reader = csv.DictReader(handle, delimiter=delimiter)
         fields = reader.fieldnames or []
         if not fields:
-            raise ValueError("input has no header")
+            raise ValueError("输入文件缺少表头")
         if len(fields) > MAX_COLUMNS:
-            raise ValueError(f"input exceeds {MAX_COLUMNS} columns")
+            raise ValueError(f"输入文件超过 {MAX_COLUMNS} 列限制")
         if len(set(fields)) != len(fields):
-            raise ValueError("input has duplicate column names")
+            raise ValueError("输入文件包含重复列名")
 
         missing = Counter({field: 0 for field in fields})
         numeric_count = Counter({field: 0 for field in fields})
@@ -105,16 +105,16 @@ def profile(path: Path, max_rows: int) -> dict[str, Any]:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("input", help="CSV or TSV path, relative to --root when not absolute")
-    parser.add_argument("--root", required=True, help="approved workspace root")
-    parser.add_argument("--max-rows", type=int, default=100_000)
+    parser.add_argument("input", help="CSV 或 TSV 路径；相对路径以 --root 为基准")
+    parser.add_argument("--root", required=True, help="已批准的工作区根目录")
+    parser.add_argument("--max-rows", type=int, default=100_000, help="最多分析的行数")
     args = parser.parse_args()
     if not 1 <= args.max_rows <= 1_000_000:
-        parser.error("--max-rows must be between 1 and 1000000")
+        parser.error("--max-rows 必须介于 1 和 1000000 之间")
     try:
         result = profile(safe_input(args.input, args.root), args.max_rows)
     except (OSError, UnicodeError, ValueError, csv.Error) as exc:
-        parser.exit(2, f"profile_csv: {exc}\n")
+        parser.exit(2, f"profile_csv：{exc}\n")
     print(json.dumps(result, ensure_ascii=False, indent=2, sort_keys=True))
     return 0
 

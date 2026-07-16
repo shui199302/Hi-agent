@@ -1,19 +1,19 @@
 ---
 name: data-analysis
-description: "Inspect and analyze tabular data with reproducible calculations, quality checks, and clear caveats. Use for CSV or TSV profiling, descriptive statistics, segment comparison, trend analysis, anomaly review, and decision-oriented interpretation of supplied datasets."
+description: "通过可复现计算、质量检查和明确限制分析表格数据。适用于 CSV/TSV 数据画像、描述性统计、分组对比、趋势分析、异常审查和面向决策的数据解释。"
 ---
 
-# Data Analysis
+# 数据分析
 
-## Workflow
+## 工作流程
 
-1. Define the unit of observation, target measures, time range, and decision the analysis should inform.
-2. Profile schema, missingness, duplicates, types, ranges, and category cardinality before calculating conclusions.
-3. Preserve the original data. Document filtering, coercion, exclusions, and denominator choices.
-4. Use the simplest analysis that answers the question. Separate description, association, and causal claims.
-5. Validate surprising results with an independent calculation and relevant subsets.
-6. Report findings with units, sample size, uncertainty, limitations, and reproducible steps.
+1. 明确观察单位、目标指标、时间范围和分析需要支持的决策。
+2. 在得出结论前检查字段结构、缺失值、重复值、类型、范围和类别基数。
+3. 保留原始数据，并记录筛选、类型转换、排除规则和分母口径。
+4. 使用能回答问题的最简单方法，区分描述、关联和因果结论。
+5. 使用独立计算和相关子集复核异常结果。
+6. 报告单位、样本量、不确定性、限制和可复现步骤。
 
-For CSV or TSV profiling, run `scripts/profile_csv.py` only after skill-script execution has been enabled. Pass `--root` as the approved workspace and keep the input within that root. The script never evaluates cell contents or writes to the dataset.
+分析 CSV 或 TSV 时，仅在 Skill 脚本执行已启用后运行 `scripts/profile_csv.py`。将 `--root` 指向已批准的工作区，并确保输入文件位于该目录内。脚本不会执行单元格内容，也不会写入数据集。
 
-Read [references/analysis-contract.md](references/analysis-contract.md) before interpreting statistics or preparing the final answer.
+在解释统计结果或准备最终回答前，阅读 [references/analysis-contract.md](references/analysis-contract.md)。

@@ -1,12 +1,12 @@
-# Analysis contract
+# 分析约定
 
-Always disclose:
+始终披露：
 
-- dataset name, row count, analysis grain, and time coverage;
-- missing-value and duplicate handling;
-- filters, transformations, joins, and excluded records;
-- metric formula and denominator;
-- whether a result is descriptive, correlational, or causal;
-- important selection, measurement, survivorship, or small-sample bias.
+- 数据集名称、行数、分析粒度和时间范围；
+- 缺失值与重复数据的处理方式；
+- 筛选、转换、关联操作和被排除的记录；
+- 指标公式及其分母；
+- 结果属于描述性、相关性还是因果性结论；
+- 重要的选择偏差、测量偏差、幸存者偏差或小样本偏差。
 
-Do not infer missing values, change labels, or remove outliers silently. Avoid percentages without counts, averages without distribution context, and charts whose axes obscure scale.
+不得静默推断缺失值、修改标签或删除异常值。避免只给百分比不给数量、只给平均值不说明分布，以及使用会掩盖真实尺度的图表坐标轴。

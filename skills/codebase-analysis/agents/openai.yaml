@@ -1,4 +1,4 @@
 interface:
-  display_name: "Codebase Analysis"
-  short_description: "Trace repository behavior to file and line evidence"
-  default_prompt: "Use $codebase-analysis to map this repository and explain the requested behavior with file evidence."
+  display_name: "代码库分析"
+  short_description: "将仓库行为追溯到文件与行号证据"
+  default_prompt: "使用 $codebase-analysis 梳理此仓库，并结合文件证据解释指定行为。"

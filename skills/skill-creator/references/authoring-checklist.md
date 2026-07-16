@@ -1,10 +1,10 @@
-# Authoring checklist
+# 编写检查清单
 
-- Folder and frontmatter names match and use kebab-case.
-- Description states capability and triggering situations.
-- Instructions are concise, imperative, and free of duplicated general knowledge.
-- Large or optional details live in directly linked references.
-- Scripts are deterministic, bounded, and disabled by default.
-- No secrets, machine-specific paths, symlinks, traversal, or unreviewed network calls exist.
-- `agents/openai.yaml` matches the Skill purpose.
-- The package passes structural and security validation before use.
+- 目录名与 frontmatter 中的名称一致，并使用 kebab-case。
+- description 明确说明能力和触发场景。
+- 指令简洁、采用祈使表达，且不重复通用知识。
+- 大篇幅或可选细节放在正文直接链接的参考文件中。
+- 脚本行为确定、资源有界，并默认禁用。
+- 不包含密钥、机器特定路径、符号链接、路径穿越或未经审查的网络调用。
+- `agents/openai.yaml` 与 Skill 用途一致。
+- 使用前通过结构和安全校验。

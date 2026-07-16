@@ -1,11 +1,11 @@
-# Source quality
+# 来源质量
 
-Prefer sources in this order when they directly address the claim:
+当来源能够直接支持论断时，按以下顺序优先选择：
 
-1. Laws, standards, government datasets, official vendor documentation, and original research.
-2. Maintainer repositories, regulator notices, court filings, and named institutional reports.
-3. Reputable reporting with identifiable authors and direct sourcing.
-4. Specialist analysis with disclosed methodology and conflicts.
-5. Aggregators, forums, and social posts only as leads or evidence of the poster's own statement.
+1. 法律、标准、政府数据集、厂商官方文档和原创研究。
+2. 维护者仓库、监管机构公告、法院文件和署名机构报告。
+3. 作者身份明确、具有直接信源的可靠报道。
+4. 披露方法和利益冲突的专业分析。
+5. 聚合站、论坛和社交帖子仅作为线索，或作为发帖者自身陈述的证据。
 
-Evaluate authority, directness, recency, methodology, and conflicts of interest. Search snippets do not count as evidence. Clearly label a conclusion inferred by combining sources.
+评估来源的权威性、直接性、时效性、方法和利益冲突。搜索摘要不能作为证据。综合多个来源推导出的结论必须明确标注为推断。

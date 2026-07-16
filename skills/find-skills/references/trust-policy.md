@@ -1,10 +1,10 @@
-# Remote Skill trust policy
+# 远程 Skill 信任策略
 
-- Allow HTTPS sources from configured catalogs only.
-- Pin the repository and commit SHA when installing.
-- Display the detected license; absence of a license is a blocking warning.
-- Permit `SKILL.md`, `agents/`, `references/`, `assets/`, and `scripts/` only.
-- Never execute remote scripts during preview, validation, or installation.
-- Flag shell execution, network download commands, credential access, dynamic evaluation, encoded payloads, and prompt-injection language.
-- Require an explicit confirmation for every installation and replacement.
-- Keep installed remote Skills disabled until attached to an Agent by the user.
+- 仅允许从已配置目录中的 HTTPS 来源获取 Skill。
+- 安装时固定仓库地址和提交 SHA。
+- 展示检测到的许可证；缺少许可证时必须阻止安装并告警。
+- 只允许 `SKILL.md`、`agents/`、`references/`、`assets/` 和 `scripts/`。
+- 预览、校验和安装期间绝不执行远程脚本。
+- 标记 Shell 执行、网络下载命令、凭据访问、动态求值、编码载荷和提示注入语言。
+- 每次安装和替换都必须取得明确确认。
+- 远程 Skill 安装后保持禁用，直到用户主动将其关联到 Agent。

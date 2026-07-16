@@ -1,14 +1,14 @@
-# Acceptance checklist
+# 验收检查清单
 
-A decision-complete plan identifies:
+决策完整的计划应明确：
 
-- goal, users, success criteria, and explicit exclusions;
-- current implementation and constraints discovered from the environment;
-- chosen approach and rejected alternatives when the tradeoff matters;
-- public APIs, schemas, configuration, and compatibility changes;
-- persistence, concurrency, authorization, and error behavior;
-- migrations, rollout order, rollback, and monitoring when state or production is affected;
-- unit, integration, end-to-end, failure, and security test scenarios;
-- defaults and assumptions that an implementer must preserve.
+- 目标、用户、成功标准和明确排除项；
+- 从环境中发现的当前实现和约束；
+- 选定方案，以及在权衡重要时说明未采用的替代方案；
+- 公共 API、数据结构、配置和兼容性变更；
+- 持久化、并发、授权和错误行为；
+- 涉及状态或生产环境时的数据迁移、发布顺序、回滚和监控；
+- 单元、集成、端到端、失败路径和安全测试场景；
+- 实施者必须保留的默认值和假设。
 
-Omit categories that genuinely do not apply; do not invent complexity solely to fill the checklist.
+可省略确实不适用的类别；不得只为填满清单而虚构复杂度。

@@ -1,19 +1,19 @@
 ---
 name: report-writing
-description: "Turn supplied evidence and analysis into a clear, decision-ready report with explicit audience, claims, recommendations, and limitations. Use for briefs, technical reports, investigation reports, project updates, proposals, and executive decision memos."
+description: "将已有证据和分析整理为清晰、可支持决策的报告，明确受众、论点、建议与限制。适用于简报、技术报告、调查报告、项目进展、方案建议和管理层决策备忘录。"
 ---
 
-# Report Writing
+# 报告撰写
 
-## Workflow
+## 工作流程
 
-1. Confirm the audience, decision, scope, tone, length, and required format from the request.
-2. Build an evidence map: connect each important claim to a source or mark it as analysis.
-3. Lead with the outcome and organize sections by reader questions, not by research chronology.
-4. Make recommendations specific: identify owner, action, timing, dependency, and success measure when evidence permits.
-5. Surface material assumptions, alternatives, risks, and unresolved questions.
-6. Edit for logical flow, consistent terms, concise prose, accurate citations, and accessible tables.
+1. 根据请求确认受众、待支持的决策、范围、语气、篇幅和交付格式。
+2. 建立证据映射：为每项重要论断关联来源，或明确标注为分析判断。
+3. 先给出结论，并围绕读者关心的问题组织章节，不按调研时间线堆叠材料。
+4. 给出可执行的建议；在证据允许时明确负责人、行动、时间、依赖和成功指标。
+5. 主动说明重要假设、备选方案、风险和未解决问题。
+6. 检查逻辑衔接、术语一致性、文字精炼度、引用准确性和表格可读性。
 
-Never create facts, quotations, metrics, stakeholders, or citations to make a report feel complete. Use explicit placeholders for information the user must supply.
+不得为了让报告看似完整而虚构事实、引语、指标、相关方或引用。必须由用户补充的信息应使用明确的占位符标记。
 
-Copy and adapt [assets/decision-report-template.md](assets/decision-report-template.md) when no house format is provided.
+未提供组织内部模板时，复制并调整 [assets/decision-report-template.md](assets/decision-report-template.md)。
