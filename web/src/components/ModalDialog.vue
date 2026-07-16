@@ -1,8 +1,11 @@
 <script setup lang="ts">
+import { onDeactivated } from 'vue'
 import AppIcon from './AppIcon.vue'
 
 defineProps<{ open: boolean; title: string; description?: string; wide?: boolean }>()
-defineEmits<{ close: [] }>()
+const emit = defineEmits<{ close: [] }>()
+
+onDeactivated(() => emit('close'))
 </script>
 
 <template>
