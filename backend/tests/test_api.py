@@ -76,18 +76,27 @@ def test_health_crud_rag_run_and_resumable_events(client: TestClient) -> None:
     assert duplicate.status_code == 409
     assert duplicate.json()["error"]["code"] == "DOCUMENT_DUPLICATE"
 
-    search = client.post(
-        f"/api/v1/knowledge-bases/{kb_id}/search", json={"query": "上海外滩"}
-    )
+    search = client.post(f"/api/v1/knowledge-bases/{kb_id}/search", json={"query": "上海外滩"})
     assert search.status_code == 200, search.text
     assert search.json()["items"][0]["filename"] == "guide.md"
+    assert "dense" in search.json()["items"][0]["channels"]
+    assert "lexical" in search.json()["items"][0]["channels"]
+
+    rebuilt = client.post(
+        f"/api/v1/knowledge-bases/{kb_id}/reindex",
+        json={"embedding_model": "test-embedding", "chunk_size": 120, "chunk_overlap": 20, "top_k": 4},
+    )
+    assert rebuilt.status_code == 200, rebuilt.text
+    assert rebuilt.json()["chunk_size"] == 120
+    assert rebuilt.json()["top_k"] == 4
 
     agent_id = create_mock_agent(client, knowledge_base_id=kb_id)
+    revisions = client.get(f"/api/v1/agents/{agent_id}/revisions")
+    assert revisions.status_code == 200
+    assert revisions.json()[0]["version"] == 1
     chat = client.post("/api/v1/sessions", json={"title": "旅行", "agent_id": agent_id})
     assert chat.status_code == 201
-    run_response = client.post(
-        f"/api/v1/sessions/{chat.json()['id']}/runs", json={"message": "介绍上海外滩"}
-    )
+    run_response = client.post(f"/api/v1/sessions/{chat.json()['id']}/runs", json={"message": "介绍上海外滩"})
     assert run_response.status_code == 202, run_response.text
     accepted = run_response.json()
     assert accepted["events_url"].endswith(f"/runs/{accepted['run_id']}/events")
@@ -114,14 +123,35 @@ def test_health_crud_rag_run_and_resumable_events(client: TestClient) -> None:
     assert "event: completed" in replay.text
     assert '"run_id"' in replay.text
 
+    summary = client.get("/api/v1/observability/summary")
+    assert summary.status_code == 200
+    assert summary.json()["total_runs"] >= 1
+
+
+def test_create_skill_requires_confirmation_and_stays_in_skill_root(client: TestClient) -> None:
+    payload = {
+        "name": "customer-support",
+        "description": "Handle repeatable customer support triage and evidence-backed response drafting.",
+        "instructions": "# Workflow\n\n1. Classify the request.\n2. Draft and verify the response.",
+        "display_name": "客户支持",
+        "short_description": "分类并处理客户支持请求",
+        "default_prompt": "处理这个客户支持请求。",
+        "confirm": False,
+    }
+    rejected = client.post("/api/v1/skills", json=payload)
+    assert rejected.status_code == 409
+    payload["confirm"] = True
+    created = client.post("/api/v1/skills", json=payload)
+    assert created.status_code == 201, created.text
+    assert created.json()["name"] == "customer-support"
+    assert (client.app.state.settings.skills_dir / "customer-support" / "SKILL.md").is_file()
+
 
 def test_session_allows_only_one_active_run_and_approval_resume(
     client: TestClient,
 ) -> None:
     agent_id = create_mock_agent(client)
-    session_id = client.post(
-        "/api/v1/sessions", json={"title": "审批", "agent_id": agent_id}
-    ).json()["id"]
+    session_id = client.post("/api/v1/sessions", json={"title": "审批", "agent_id": agent_id}).json()["id"]
     manager = client.app.state.run_manager
 
     async def fake_discover(_: str, __: dict[str, Any]) -> list[dict[str, Any]]:
@@ -152,14 +182,9 @@ def test_session_allows_only_one_active_run_and_approval_resume(
     assert waiting["status"] == "waiting_approval", waiting
     filtered_runs = client.get(f"/api/v1/runs?session_id={session_id}")
     assert filtered_runs.status_code == 200
-    assert any(
-        item["id"] == run_id and item["status"] == "waiting_approval"
-        for item in filtered_runs.json()
-    )
+    assert any(item["id"] == run_id and item["status"] == "waiting_approval" for item in filtered_runs.json())
 
-    conflict = client.post(
-        f"/api/v1/sessions/{session_id}/runs", json={"message": "不能并发"}
-    )
+    conflict = client.post(f"/api/v1/sessions/{session_id}/runs", json={"message": "不能并发"})
     assert conflict.status_code == 409
     assert conflict.json()["error"]["code"] == "SESSION_RUN_CONFLICT"
 
@@ -215,9 +240,7 @@ def test_validation_and_not_found_are_structured(client: TestClient) -> None:
 
 def test_spa_fallback_never_swallows_unknown_api(settings: Settings) -> None:
     settings.web_dist_dir.mkdir(parents=True)
-    (settings.web_dist_dir / "index.html").write_text(
-        "<!doctype html><title>Hi-agent SPA</title>", encoding="utf-8"
-    )
+    (settings.web_dist_dir / "index.html").write_text("<!doctype html><title>Hi-agent SPA</title>", encoding="utf-8")
     app = create_app(settings)
     with TestClient(app) as standalone:
         assert "Hi-agent SPA" in standalone.get("/workspace").text

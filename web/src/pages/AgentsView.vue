@@ -19,6 +19,10 @@ const loadError = ref('')
 const saving = ref(false)
 const modalOpen = ref(false)
 const editingId = ref<string | null>(null)
+interface AgentRevision { id: string; version: number; reason: string; created_at: string; snapshot: Record<string, unknown> }
+const revisionsOpen = ref(false)
+const revisions = ref<AgentRevision[]>([])
+const revisionAgent = ref<AgentConfig | null>(null)
 
 const form = reactive({
   name: '',
@@ -138,6 +142,23 @@ async function remove(agent: AgentConfig): Promise<void> {
   }
 }
 
+async function openRevisions(agent: AgentConfig): Promise<void> {
+  revisionAgent.value = agent
+  revisionsOpen.value = true
+  try { revisions.value = await request<AgentRevision[]>(`/agents/${agent.id}/revisions`) }
+  catch (error) { notify(formatApiError(error), 'error') }
+}
+
+async function restoreRevision(revision: AgentRevision): Promise<void> {
+  if (!revisionAgent.value || !window.confirm(`确认将“${revisionAgent.value.name}”恢复到版本 ${revision.version}？当前配置会先保存为新版本。`)) return
+  try {
+    await request(`/agents/${revisionAgent.value.id}/revisions/${revision.id}/restore`, { method: 'POST' })
+    notify(`已恢复版本 ${revision.version}`, 'success')
+    revisions.value = await request<AgentRevision[]>(`/agents/${revisionAgent.value.id}/revisions`)
+    await load()
+  } catch (error) { notify(formatApiError(error), 'error') }
+}
+
 function modelName(id?: string | null): string {
   const model = models.value.find((item) => item.id === id)
   return model?.name ?? model?.model ?? '未绑定模型'
@@ -197,6 +218,7 @@ onActivated(() => { if (!loading.value) void load() })
             <span><AppIcon name="sparkles" :size="13" />{{ (agent.skills ?? agent.enabled_skills ?? []).length }} Skills</span>
             <span><AppIcon name="plug" :size="13" />{{ (agent.mcp_servers ?? agent.enabled_mcp_servers ?? []).length }} MCP</span>
             <span class="agent-actions">
+              <button class="icon-button" type="button" aria-label="配置版本" @click="openRevisions(agent)"><AppIcon name="activity" :size="16" /></button>
               <button class="icon-button" type="button" aria-label="编辑智能体" @click="openEdit(agent)"><AppIcon name="edit" :size="16" /></button>
               <button class="icon-button remove" type="button" aria-label="删除智能体" @click="remove(agent)"><AppIcon name="trash" :size="16" /></button>
             </span>
@@ -273,6 +295,10 @@ onActivated(() => { if (!loading.value) void load() })
         <button class="button" type="button" :disabled="saving" @click="save">{{ saving ? '保存中…' : '保存配置' }}</button>
       </template>
     </ModalDialog>
+    <ModalDialog :open="revisionsOpen" title="Agent 配置版本" :description="revisionAgent?.name" @close="revisionsOpen = false">
+      <div class="revision-list"><article v-for="revision in revisions" :key="revision.id"><div><strong>版本 {{ revision.version }}</strong><span>{{ revision.reason }} · {{ new Date(revision.created_at).toLocaleString('zh-CN') }}</span></div><button class="button secondary small" type="button" @click="restoreRevision(revision)">恢复</button></article></div>
+      <template #footer><button class="button secondary" type="button" @click="revisionsOpen = false">关闭</button></template>
+    </ModalDialog>
   </div>
 </template>
 
@@ -300,5 +326,6 @@ onActivated(() => { if (!loading.value) void load() })
 .check-option span { display: flex; min-width: 0; flex-direction: column; }
 .check-option strong { font-size: 10px; }
 .check-option small { display: -webkit-box; margin-top: 3px; overflow: hidden; color: var(--muted); font-size: 8px; line-height: 1.45; -webkit-box-orient: vertical; -webkit-line-clamp: 2; }
+.revision-list { display:grid; gap:8px; max-height:420px; overflow:auto; }.revision-list article { display:flex;align-items:center;justify-content:space-between;gap:12px;padding:11px;border:1px solid var(--line);border-radius:9px }.revision-list article div { display:flex;flex-direction:column;gap:4px }.revision-list strong { font-size:10px }.revision-list span { color:var(--muted);font-size:8px }
 @media (max-width: 560px) { .option-grid { grid-template-columns: 1fr; } }
 </style>

@@ -39,4 +39,3 @@ class ConflictError(HiAgentError):
 class ServiceUnavailableError(HiAgentError):
     def __init__(self, code: str, message: str, **details: Any) -> None:
         super().__init__(code, message, status_code=503, details=details)
-

@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import time
+from collections import Counter
 from collections.abc import AsyncIterator
 from typing import Any, cast
 
@@ -21,6 +22,7 @@ from .mcp_client import McpClient
 from .models import (
     ACTIVE_RUN_STATUSES,
     AgentConfig,
+    AgentRevision,
     Approval,
     ChatSession,
     Document,
@@ -38,6 +40,7 @@ from .runtime import RunManager, snapshot_agent
 from .schemas import (
     AgentCreate,
     AgentRead,
+    AgentRevisionRead,
     AgentUpdate,
     ApprovalDecision,
     ApprovalRead,
@@ -45,6 +48,7 @@ from .schemas import (
     DocumentRead,
     KnowledgeBaseCreate,
     KnowledgeBaseRead,
+    KnowledgeBaseReindex,
     KnowledgeBaseUpdate,
     McpProbeResponse,
     McpServerCreate,
@@ -53,6 +57,8 @@ from .schemas import (
     ModelEndpointCreate,
     ModelEndpointRead,
     ModelEndpointUpdate,
+    RemoteSkillInstall,
+    RemoteSkillRead,
     RunAccepted,
     RunCreate,
     RunEventRead,
@@ -63,6 +69,7 @@ from .schemas import (
     SessionDetail,
     SessionRead,
     SessionUpdate,
+    SkillCreateRequest,
     SkillDetail,
     SkillMetadata,
     SystemStatus,
@@ -70,6 +77,8 @@ from .schemas import (
 from .skills import SkillRegistry
 
 router = APIRouter(prefix="/api/v1")
+
+
 def _get[ModelT](db: Session, model: type[ModelT], item_id: str, label: str) -> ModelT:
     item = db.get(model, item_id)
     if item is None:
@@ -121,6 +130,27 @@ def _knowledge_base_read(db: Session, kb: KnowledgeBase) -> KnowledgeBaseRead:
     )
 
 
+def _agent_snapshot(agent: AgentConfig) -> dict[str, Any]:
+    return {
+        "name": agent.name,
+        "description": agent.description,
+        "system_prompt": agent.system_prompt,
+        "model_endpoint_id": agent.model_endpoint_id,
+        "knowledge_base_id": agent.knowledge_base_id,
+        "skills": list(agent.skills),
+        "mcp_servers": list(agent.mcp_servers),
+        "tool_policy": dict(agent.tool_policy),
+        "max_tool_loops": agent.max_tool_loops,
+        "enabled": agent.enabled,
+    }
+
+
+def _save_agent_revision(db: Session, agent: AgentConfig, reason: str) -> None:
+    latest = db.scalar(select(func.max(AgentRevision.version)).where(AgentRevision.agent_id == agent.id)) or 0
+    db.add(AgentRevision(agent_id=agent.id, version=int(latest) + 1, snapshot=_agent_snapshot(agent), reason=reason))
+    db.commit()
+
+
 @router.get("/health")
 def health() -> dict[str, str]:
     return {"status": "ok", "version": __version__}
@@ -129,9 +159,7 @@ def health() -> dict[str, str]:
 @router.get("/system/status", response_model=SystemStatus)
 def system_status(request: Request, db: Session = Depends(get_db)) -> SystemStatus:
     active = db.scalar(select(func.count()).select_from(Run).where(Run.status.in_(ACTIVE_RUN_STATUSES))) or 0
-    interrupted = db.scalar(
-        select(func.count()).select_from(Run).where(Run.status == RunStatus.interrupted.value)
-    ) or 0
+    interrupted = db.scalar(select(func.count()).select_from(Run).where(Run.status == RunStatus.interrupted.value)) or 0
     settings = request.app.state.settings
     manager = _manager(request)
     return SystemStatus(
@@ -163,9 +191,7 @@ def get_model(model_id: str, db: Session = Depends(get_db)) -> ModelEndpoint:
 
 
 @router.patch("/models/{model_id}", response_model=ModelEndpointRead)
-def update_model(
-    model_id: str, payload: ModelEndpointUpdate, db: Session = Depends(get_db)
-) -> ModelEndpoint:
+def update_model(model_id: str, payload: ModelEndpointUpdate, db: Session = Depends(get_db)) -> ModelEndpoint:
     return _commit(db, _apply(_get(db, ModelEndpoint, model_id, "ModelEndpoint"), payload))
 
 
@@ -182,9 +208,7 @@ def list_knowledge_bases(db: Session = Depends(get_db)) -> list[KnowledgeBaseRea
     return [_knowledge_base_read(db, item) for item in items]
 
 
-@router.post(
-    "/knowledge-bases", response_model=KnowledgeBaseRead, status_code=status.HTTP_201_CREATED
-)
+@router.post("/knowledge-bases", response_model=KnowledgeBaseRead, status_code=status.HTTP_201_CREATED)
 def create_knowledge_base(
     request: Request, payload: KnowledgeBaseCreate, db: Session = Depends(get_db)
 ) -> KnowledgeBaseRead:
@@ -200,11 +224,18 @@ def get_knowledge_base(kb_id: str, db: Session = Depends(get_db)) -> KnowledgeBa
 
 
 @router.patch("/knowledge-bases/{kb_id}", response_model=KnowledgeBaseRead)
-def update_knowledge_base(
-    kb_id: str, payload: KnowledgeBaseUpdate, db: Session = Depends(get_db)
-) -> KnowledgeBaseRead:
+def update_knowledge_base(kb_id: str, payload: KnowledgeBaseUpdate, db: Session = Depends(get_db)) -> KnowledgeBaseRead:
     kb = _commit(db, _apply(_get(db, KnowledgeBase, kb_id, "KnowledgeBase"), payload))
     return _knowledge_base_read(db, kb)
+
+
+@router.post("/knowledge-bases/{kb_id}/reindex", response_model=KnowledgeBaseRead)
+def reindex_knowledge_base(
+    request: Request, kb_id: str, payload: KnowledgeBaseReindex, db: Session = Depends(get_db)
+) -> KnowledgeBaseRead:
+    kb = _get(db, KnowledgeBase, kb_id, "KnowledgeBase")
+    rebuilt = _rag(request).reindex(db, kb, **payload.model_dump())
+    return _knowledge_base_read(db, rebuilt)
 
 
 @router.delete("/knowledge-bases/{kb_id}", status_code=status.HTTP_204_NO_CONTENT)
@@ -228,9 +259,7 @@ def list_documents(kb_id: str, db: Session = Depends(get_db)) -> list[Document]:
     _get(db, KnowledgeBase, kb_id, "KnowledgeBase")
     return list(
         db.scalars(
-            select(Document)
-            .where(Document.knowledge_base_id == kb_id)
-            .order_by(Document.created_at.desc())
+            select(Document).where(Document.knowledge_base_id == kb_id).order_by(Document.created_at.desc())
         ).all()
     )
 
@@ -296,7 +325,9 @@ def search_knowledge_base(
 ) -> SearchResponse:
     kb = _get(db, KnowledgeBase, kb_id, "KnowledgeBase")
     return SearchResponse(
-        items=_rag(request).search(db, kb, payload.query, payload.top_k)
+        items=_rag(request).search(db, kb, payload.query, payload.top_k, payload.mode),
+        mode=payload.mode,
+        query=payload.query,
     )
 
 
@@ -334,7 +365,9 @@ def create_agent(
     db: Session = Depends(get_db),
 ) -> AgentConfig:
     _validate_agent(request, db, payload)
-    return _commit(db, AgentConfig(**payload.model_dump()))
+    agent = _commit(db, AgentConfig(**payload.model_dump()))
+    _save_agent_revision(db, agent, "创建智能体")
+    return agent
 
 
 @router.get("/agents/{agent_id}", response_model=AgentRead)
@@ -350,7 +383,68 @@ def update_agent(
     db: Session = Depends(get_db),
 ) -> AgentConfig:
     _validate_agent(request, db, payload)
-    return _commit(db, _apply(_get(db, AgentConfig, agent_id, "Agent"), payload))
+    agent = _commit(db, _apply(_get(db, AgentConfig, agent_id, "Agent"), payload))
+    _save_agent_revision(db, agent, "配置更新")
+    return agent
+
+
+@router.get("/agents/{agent_id}/revisions", response_model=list[AgentRevisionRead])
+def list_agent_revisions(agent_id: str, db: Session = Depends(get_db)) -> list[AgentRevision]:
+    _get(db, AgentConfig, agent_id, "Agent")
+    return list(
+        db.scalars(
+            select(AgentRevision).where(AgentRevision.agent_id == agent_id).order_by(AgentRevision.version.desc())
+        ).all()
+    )
+
+
+@router.post("/agents/{agent_id}/revisions/{revision_id}/restore", response_model=AgentRead)
+def restore_agent_revision(
+    request: Request, agent_id: str, revision_id: str, db: Session = Depends(get_db)
+) -> AgentConfig:
+    agent = _get(db, AgentConfig, agent_id, "Agent")
+    revision = _get(db, AgentRevision, revision_id, "AgentRevision")
+    if revision.agent_id != agent_id:
+        raise NotFoundError("AgentRevision", revision_id)
+    payload = AgentUpdate.model_validate(revision.snapshot)
+    _validate_agent(request, db, payload)
+    agent = _commit(db, _apply(agent, payload))
+    _save_agent_revision(db, agent, f"恢复版本 {revision.version}")
+    return agent
+
+
+@router.get("/observability/summary")
+def observability_summary(db: Session = Depends(get_db)) -> dict[str, Any]:
+    runs = list(db.scalars(select(Run).order_by(Run.created_at.desc()).limit(100)).all())
+    status_counts = Counter(run.status for run in runs)
+    completed = [run for run in runs if run.started_at and run.finished_at]
+    durations = [
+        (run.finished_at - run.started_at).total_seconds() for run in completed if run.finished_at and run.started_at
+    ]
+    recent = []
+    for run in runs[:20]:
+        events = list(db.scalars(select(RunEvent).where(RunEvent.run_id == run.id)).all())
+        retrieval_hits = sum(len(event.data.get("items", [])) for event in events if event.type == "retrieval")
+        recent.append(
+            {
+                "id": run.id,
+                "agent_id": run.agent_id,
+                "status": run.status,
+                "duration_seconds": (run.finished_at - run.started_at).total_seconds()
+                if run.finished_at and run.started_at
+                else None,
+                "tool_calls": sum(event.type == "tool_call" for event in events),
+                "retrieval_hits": retrieval_hits,
+                "error_code": run.error_code,
+                "created_at": run.created_at,
+            }
+        )
+    return {
+        "total_runs": len(runs),
+        "status_counts": dict(status_counts),
+        "average_duration_seconds": sum(durations) / len(durations) if durations else 0,
+        "recent_runs": recent,
+    }
 
 
 @router.delete("/agents/{agent_id}", status_code=status.HTTP_204_NO_CONTENT)
@@ -380,9 +474,7 @@ def get_mcp_server(server_id: str, db: Session = Depends(get_db)) -> McpServerCo
 
 
 @router.patch("/mcp/servers/{server_id}", response_model=McpServerRead)
-def update_mcp_server(
-    server_id: str, payload: McpServerUpdate, db: Session = Depends(get_db)
-) -> McpServerConfig:
+def update_mcp_server(server_id: str, payload: McpServerUpdate, db: Session = Depends(get_db)) -> McpServerConfig:
     server = _get(db, McpServerConfig, server_id, "McpServer")
     updated = _apply(server, payload)
     if updated.transport == "stdio" and not updated.command:
@@ -400,9 +492,7 @@ def delete_mcp_server(server_id: str, db: Session = Depends(get_db)) -> Response
 
 
 @router.post("/mcp/servers/{server_id}/probe", response_model=McpProbeResponse)
-async def probe_mcp_server(
-    request: Request, server_id: str, db: Session = Depends(get_db)
-) -> McpProbeResponse:
+async def probe_mcp_server(request: Request, server_id: str, db: Session = Depends(get_db)) -> McpProbeResponse:
     server = _get(db, McpServerConfig, server_id, "McpServer")
     try:
         tools = await _mcp(request).list_tools(server)
@@ -427,6 +517,23 @@ def get_skill(request: Request, skill_name: str) -> SkillDetail:
     return _skills(request).get(skill_name)
 
 
+@router.get("/skills-remote/search", response_model=list[RemoteSkillRead])
+def search_remote_skills(request: Request, q: str = Query(min_length=2, max_length=120)) -> list[RemoteSkillRead]:
+    return _skills(request).search_remote(q)
+
+
+@router.post("/skills-remote/install", response_model=SkillMetadata, status_code=status.HTTP_201_CREATED)
+def install_remote_skill(request: Request, payload: RemoteSkillInstall) -> SkillMetadata:
+    return _skills(request).install_remote(
+        payload.catalog, payload.path, confirm=payload.confirm, replace=payload.replace
+    )
+
+
+@router.post("/skills", response_model=SkillMetadata, status_code=status.HTTP_201_CREATED)
+def create_skill(request: Request, payload: SkillCreateRequest) -> SkillMetadata:
+    return _skills(request).create_skill(payload)
+
+
 @router.get("/sessions", response_model=list[SessionRead])
 def list_sessions(db: Session = Depends(get_db)) -> list[ChatSession]:
     return list(db.scalars(select(ChatSession).order_by(ChatSession.updated_at.desc())).all())
@@ -446,9 +553,7 @@ def get_session(session_id: str, db: Session = Depends(get_db)) -> ChatSession:
 
 
 @router.patch("/sessions/{session_id}", response_model=SessionRead)
-def update_session(
-    session_id: str, payload: SessionUpdate, db: Session = Depends(get_db)
-) -> ChatSession:
+def update_session(session_id: str, payload: SessionUpdate, db: Session = Depends(get_db)) -> ChatSession:
     return _commit(db, _apply(_get(db, ChatSession, session_id, "Session"), payload))
 
 
@@ -456,9 +561,7 @@ def update_session(
 def delete_session(session_id: str, db: Session = Depends(get_db)) -> Response:
     session = _get(db, ChatSession, session_id, "Session")
     active = db.scalar(
-        select(func.count())
-        .select_from(Run)
-        .where(Run.session_id == session_id, Run.status.in_(ACTIVE_RUN_STATUSES))
+        select(func.count()).select_from(Run).where(Run.session_id == session_id, Run.status.in_(ACTIVE_RUN_STATUSES))
     )
     if active:
         raise ConflictError("SESSION_HAS_ACTIVE_RUN", "会话仍有活动 Run")
@@ -479,13 +582,9 @@ async def create_run(
     db: Session = Depends(get_db),
 ) -> RunAccepted:
     chat_session = _get(db, ChatSession, session_id, "Session")
-    active = db.scalar(
-        select(Run).where(Run.session_id == session_id, Run.status.in_(ACTIVE_RUN_STATUSES))
-    )
+    active = db.scalar(select(Run).where(Run.session_id == session_id, Run.status.in_(ACTIVE_RUN_STATUSES)))
     if active:
-        raise ConflictError(
-            "SESSION_RUN_CONFLICT", "每个会话同时只允许一个活动 Run", run_id=active.id
-        )
+        raise ConflictError("SESSION_RUN_CONFLICT", "每个会话同时只允许一个活动 Run", run_id=active.id)
     agent = _get(db, AgentConfig, chat_session.agent_id, "Agent")
     if not agent.enabled:
         raise HiAgentError("AGENT_DISABLED", "Agent 已禁用")
@@ -511,9 +610,7 @@ async def create_run(
 
 
 @router.get("/runs", response_model=list[RunRead])
-def list_runs(
-    session_id: str | None = Query(default=None), db: Session = Depends(get_db)
-) -> list[Run]:
+def list_runs(session_id: str | None = Query(default=None), db: Session = Depends(get_db)) -> list[Run]:
     statement = select(Run).order_by(Run.created_at.desc())
     if session_id:
         statement = statement.where(Run.session_id == session_id)
@@ -533,11 +630,7 @@ def get_run_events(
 ) -> list[RunEvent]:
     _get(db, Run, run_id, "Run")
     return list(
-        db.scalars(
-            select(RunEvent)
-            .where(RunEvent.run_id == run_id, RunEvent.id > after)
-            .order_by(RunEvent.id)
-        ).all()
+        db.scalars(select(RunEvent).where(RunEvent.run_id == run_id, RunEvent.id > after).order_by(RunEvent.id)).all()
     )
 
 
@@ -575,11 +668,7 @@ async def stream_run_events(
             for item in items:
                 cursor = item.id
                 payload = RunEventRead.model_validate(item).model_dump(mode="json")
-                yield (
-                    f"id: {item.id}\n"
-                    f"event: {item.type}\n"
-                    f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
-                )
+                yield (f"id: {item.id}\nevent: {item.type}\ndata: {json.dumps(payload, ensure_ascii=False)}\n\n")
             if terminal and not items:
                 return
             if time.monotonic() - last_heartbeat >= request.app.state.settings.sse_heartbeat_seconds:
@@ -614,9 +703,7 @@ async def cancel_run(request: Request, run_id: str) -> CancelResponse:
 @router.get("/runs/{run_id}/approvals", response_model=list[ApprovalRead])
 def list_approvals(run_id: str, db: Session = Depends(get_db)) -> list[Approval]:
     _get(db, Run, run_id, "Run")
-    return list(
-        db.scalars(select(Approval).where(Approval.run_id == run_id).order_by(Approval.created_at)).all()
-    )
+    return list(db.scalars(select(Approval).where(Approval.run_id == run_id).order_by(Approval.created_at)).all())
 
 
 @router.post("/runs/{run_id}/approvals/{approval_id}", response_model=ApprovalRead)

@@ -1,0 +1,4 @@
+interface:
+  display_name: "创建 Skill"
+  short_description: "在受控目录中设计、生成并校验 Agent Skill"
+  default_prompt: "根据我的使用场景创建一个符合 Agent Skills 规范的 Skill，并在写入前展示计划。"

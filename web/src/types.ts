@@ -41,6 +41,10 @@ export interface KnowledgeBase {
   description?: string
   document_count?: number
   chunk_count?: number
+  embedding_model?: string
+  chunk_size?: number
+  chunk_overlap?: number
+  top_k?: number
   created_at?: string
   updated_at?: string
 }
@@ -95,6 +99,18 @@ export interface SkillMetadata {
   error?: string | null
   version?: string
   source?: string
+}
+
+export interface RemoteSkill {
+  catalog: string
+  repository: string
+  ref: string
+  path: string
+  name: string
+  description: string
+  source_url: string
+  has_scripts: boolean
+  license?: string | null
 }
 
 export interface SessionItem {
@@ -163,6 +179,9 @@ export interface SearchResult extends Citation {
   document_id: Id
   content: string
   score: number
+  dense_score?: number | null
+  lexical_score?: number | null
+  channels?: string[]
 }
 
 export interface SystemStatus {

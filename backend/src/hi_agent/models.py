@@ -143,6 +143,18 @@ class AgentConfig(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now_utc, onupdate=now_utc)
 
 
+class AgentRevision(Base):
+    __tablename__ = "agent_revisions"
+    __table_args__ = (UniqueConstraint("agent_id", "version", name="uq_agent_revision_version"),)
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    agent_id: Mapped[str] = mapped_column(ForeignKey("agents.id", ondelete="CASCADE"), index=True)
+    version: Mapped[int] = mapped_column(Integer)
+    snapshot: Mapped[dict[str, Any]] = mapped_column(JSON)
+    reason: Mapped[str] = mapped_column(String(200), default="配置更新")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now_utc)
+
+
 class ChatSession(Base):
     __tablename__ = "sessions"
 

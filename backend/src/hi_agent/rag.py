@@ -7,6 +7,7 @@ import io
 import math
 import re
 import uuid
+from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -256,11 +257,30 @@ class RagService:
         ]
         client.upsert(collection_name=collection, points=points, wait=True)
 
-    def search(self, db: Session, kb: KnowledgeBase, query: str, top_k: int | None = None) -> list[SearchHit]:
+    def search(
+        self,
+        db: Session,
+        kb: KnowledgeBase,
+        query: str,
+        top_k: int | None = None,
+        mode: str = "hybrid",
+    ) -> list[SearchHit]:
         limit = top_k or kb.top_k
         vector = self.embeddings.embed([query], kb.embedding_model)[0]
         if self.settings.embedding_backend == "deterministic":
-            return self._search_database(db, kb.id, vector, limit)
+            dense = self._search_database(db, kb.id, vector, max(limit * 4, limit))
+        else:
+            dense = self._search_qdrant(kb, vector, max(limit * 4, limit))
+        if mode == "dense":
+            return [
+                item.model_copy(update={"dense_score": item.score, "channels": ["dense"]}) for item in dense[:limit]
+            ]
+        lexical = self._search_lexical(db, kb.id, query, max(limit * 4, limit))
+        if mode == "lexical":
+            return lexical[:limit]
+        return self._rrf(dense, lexical, limit)
+
+    def _search_qdrant(self, kb: KnowledgeBase, vector: list[float], limit: int) -> list[SearchHit]:
         client = self._client()
         collection = self._collection(kb.id)
         if not client.collection_exists(collection):
@@ -278,9 +298,120 @@ class RagService:
                 chunk_index=int(point.payload["chunk_index"]),
                 content=str(point.payload["content"]),
                 score=float(point.score),
+                dense_score=float(point.score),
+                channels=["dense"],
             )
             for point in points
         ]
+
+    @staticmethod
+    def _search_lexical(db: Session, kb_id: str, query: str, limit: int) -> list[SearchHit]:
+        rows = db.execute(
+            select(DocumentChunk, Document)
+            .join(Document)
+            .where(Document.knowledge_base_id == kb_id, Document.status == "ready")
+        ).all()
+        query_tokens = [item.group(0).lower() for item in _TOKEN.finditer(query)]
+        if not query_tokens or not rows:
+            return []
+        documents = [[item.group(0).lower() for item in _TOKEN.finditer(chunk.content)] for chunk, _ in rows]
+        average_length = sum(map(len, documents)) / len(documents) or 1.0
+        document_frequency = Counter(token for token in set(query_tokens) for doc in documents if token in doc)
+        scores: list[tuple[float, DocumentChunk, Document]] = []
+        for (chunk, document), tokens in zip(rows, documents, strict=True):
+            counts = Counter(tokens)
+            score = 0.0
+            for token in set(query_tokens):
+                frequency = counts[token]
+                if not frequency:
+                    continue
+                idf = math.log(1 + (len(rows) - document_frequency[token] + 0.5) / (document_frequency[token] + 0.5))
+                score += idf * frequency * 2.2 / (frequency + 1.2 * (0.25 + 0.75 * len(tokens) / average_length))
+            if score > 0:
+                scores.append((score, chunk, document))
+        scores.sort(key=lambda item: item[0], reverse=True)
+        maximum = scores[0][0] if scores else 1.0
+        return [
+            SearchHit(
+                document_id=document.id,
+                filename=document.filename,
+                page=chunk.page,
+                chunk_index=chunk.chunk_index,
+                content=chunk.content,
+                score=score / maximum,
+                lexical_score=score / maximum,
+                channels=["lexical"],
+            )
+            for score, chunk, document in scores[:limit]
+        ]
+
+    @staticmethod
+    def _rrf(dense: list[SearchHit], lexical: list[SearchHit], limit: int) -> list[SearchHit]:
+        combined: dict[tuple[str, int], dict[str, Any]] = {}
+        for channel, items in (("dense", dense), ("lexical", lexical)):
+            for rank, item in enumerate(items, 1):
+                key = (item.document_id, item.chunk_index)
+                entry = combined.setdefault(
+                    key, {"item": item, "score": 0.0, "channels": [], "dense": None, "lexical": None}
+                )
+                entry["score"] += 1.0 / (60 + rank)
+                entry["channels"].append(channel)
+                entry[channel] = item.score
+        ranked = sorted(combined.values(), key=lambda item: item["score"], reverse=True)[:limit]
+        maximum = ranked[0]["score"] if ranked else 1.0
+        return [
+            entry["item"].model_copy(
+                update={
+                    "score": entry["score"] / maximum,
+                    "dense_score": entry["dense"],
+                    "lexical_score": entry["lexical"],
+                    "channels": entry["channels"],
+                }
+            )
+            for entry in ranked
+        ]
+
+    def reindex(
+        self, db: Session, kb: KnowledgeBase, *, embedding_model: str, chunk_size: int, chunk_overlap: int, top_k: int
+    ) -> KnowledgeBase:
+        documents = list(db.scalars(select(Document).where(Document.knowledge_base_id == kb.id)).all())
+        prepared: list[tuple[Document, list[Chunk], list[list[float]]]] = []
+        for document in documents:
+            content = Path(document.storage_path).read_bytes()
+            chunks = chunk_pages(parse_document(document.filename, content), chunk_size, chunk_overlap)
+            vectors = self.embeddings.embed([chunk.content for chunk in chunks], embedding_model)
+            prepared.append((document, chunks, vectors))
+        if self.settings.embedding_backend != "deterministic":
+            client = self._client()
+            collection = self._collection(kb.id)
+            if client.collection_exists(collection):
+                client.delete_collection(collection)
+        for document, chunks, vectors in prepared:
+            for old in list(document.chunks):
+                db.delete(old)
+            db.flush()
+            for chunk, vector in zip(chunks, vectors, strict=True):
+                db.add(
+                    DocumentChunk(
+                        document_id=document.id,
+                        chunk_index=chunk.chunk_index,
+                        page=chunk.page,
+                        content=chunk.content,
+                        vector_json=vector,
+                    )
+                )
+            document.chunk_count = len(chunks)
+            document.status = "ready"
+            if self.settings.embedding_backend != "deterministic":
+                kb.embedding_model = embedding_model
+                self._upsert_qdrant(kb, document, chunks, vectors)
+        kb.embedding_model = embedding_model
+        kb.chunk_size = chunk_size
+        kb.chunk_overlap = chunk_overlap
+        kb.top_k = top_k
+        db.commit()
+        db.refresh(kb)
+        return kb
 
     @staticmethod
     def _search_database(db: Session, kb_id: str, query: list[float], limit: int) -> list[SearchHit]:
@@ -320,9 +451,7 @@ class RagService:
                     points_selector=qmodels.FilterSelector(
                         filter=qmodels.Filter(
                             must=[
-                                qmodels.FieldCondition(
-                                    key="document_id", match=qmodels.MatchValue(value=document.id)
-                                )
+                                qmodels.FieldCondition(key="document_id", match=qmodels.MatchValue(value=document.id))
                             ]
                         )
                     ),
@@ -355,4 +484,3 @@ def get_rag_service() -> RagService:
 def reset_rag_service() -> None:
     global _rag_service
     _rag_service = None
-

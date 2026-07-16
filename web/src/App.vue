@@ -11,6 +11,7 @@ const KnowledgeView = defineAsyncComponent(() => import('./pages/KnowledgeView.v
 const McpView = defineAsyncComponent(() => import('./pages/McpView.vue'))
 const SkillsView = defineAsyncComponent(() => import('./pages/SkillsView.vue'))
 const ModelsView = defineAsyncComponent(() => import('./pages/ModelsView.vue'))
+const OperationsView = defineAsyncComponent(() => import('./pages/OperationsView.vue'))
 
 const navigation = [
   { id: 'chat', label: '对话', hint: '运行智能体', icon: 'chat', component: ChatView },
@@ -19,6 +20,7 @@ const navigation = [
   { id: 'mcp', label: 'MCP', hint: '服务与工具', icon: 'plug', component: McpView },
   { id: 'skills', label: 'Skills', hint: '技能目录', icon: 'sparkles', component: SkillsView },
   { id: 'models', label: '模型与系统', hint: '端点与状态', icon: 'server', component: ModelsView },
+  { id: 'operations', label: '运行与质量', hint: 'Trace 与评测', icon: 'activity', component: OperationsView },
 ] as const
 
 const active = ref('chat')

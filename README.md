@@ -14,9 +14,10 @@ REST/SSE、LangGraph、带引用的本地 RAG、MCP 客户端与示例服务器�
 - SQLite WAL 元数据、官方 LangGraph SQLite checkpointer、配置快照和重启中断标记。
 - 可重连 SSE、事件回放、流式增量、取消、180 秒运行超时、最多 12 次工具循环。
 - PDF、DOCX、Markdown、TXT 入库；SHA-256 去重；FastEmbed + 本地 Qdrant；
-  默认 800 token 分块、120 token 重叠、Top-5。
+  可配置分块、重叠和 Top-K，并支持 Dense + BM25 + RRF 混合检索与整库重建。
 - MCP stdio 与 Streamable HTTP；工具发现、完整初始化超时、只读/联网/写入/执行风险策略。
-- 七个原创 Skills：知识库问答、文档摘要、网络研究、代码库分析、数据分析、报告写作、任务规划。
+- 九个原创 Skills，包括知识库问答、分析写作、`find-skills` 和 `skill-creator`；远程目录安装经过允许列表、暂存、安全扫描和人工确认。
+- Agent 配置版本与恢复、最近 100 次 Run 的状态/耗时/工具/RAG Trace 汇总。
 - 模型端点、Agent、知识库、MCP、Skills、会话与系统状态的中文 Web 管理界面。
 - Linux/NVIDIA vLLM Compose 固定 `vllm/vllm-openai:v0.23.0`；Mac 仅作为 `/v1` 客户端。
 
@@ -63,7 +64,8 @@ API 响应。未配置或无法连接模型时，平台不会静默切换到云�
 
 ## RAG 与引用
 
-默认模型是 `BAAI/bge-small-zh-v1.5`，向量保存在本地 Qdrant。上传限制 50 MB；
+默认模型是 `BAAI/bge-small-zh-v1.5`，向量保存在本地 Qdrant，并与本地 BM25 结果通过
+RRF 融合。知识库页面提供索引配置、召回通道对比和完整 RAG 问答实验台。上传限制 50 MB；
 文件名、路径穿越和符号链接逃逸会被拦截。检索片段以“不可信数据”送入模型，
 防止文档内容冒充系统指令。回答和 Run 终态中的 citation 包含文件名、可取得的页码、
 块编号和分数。删除文档会同步删除上传文件、元数据和向量。
@@ -88,6 +90,11 @@ Skills 遵循 `SKILL.md` 和 `scripts/references/assets` 目录结构。运行�
 `HI_AGENT_ALLOW_SKILL_SCRIPTS=true` 时出现；它仍属于 execute 风险，必须人工批准，
 使用固定 Python、固定脚本和参数数组，在超时与 `data/` 路径边界内执行。
 
+“远程发现”默认只访问 `.env` 中 `HI_AGENT_REMOTE_SKILL_CATALOGS` 允许的 GitHub
+仓库。下载内容限制文件结构、数量和体积，拦截路径穿越、二进制、密钥和危险执行模式；
+发现与安装阶段绝不执行远程脚本。安装后仍需手动绑定到 Agent。可将
+`HI_AGENT_ALLOW_REMOTE_SKILLS=false` 完全关闭该能力。
+
 只读工具可自动运行；联网工具需要 Agent 明确允许；write/execute 始终请求人工审批。
 拒绝审批后，结果会返回模型以寻找替代方案。
 
@@ -110,7 +117,8 @@ parallel、最大上下文和显存占用。模型权重、模型许可与显存
 ## API
 
 REST 统一前缀为 `/api/v1`，覆盖 `/models`、`/agents`、`/knowledge-bases`、
-`/documents`、`/mcp/servers`、`/skills`、`/sessions`、`/runs` 和 `/system/status`。
+`/documents`、`/mcp/servers`、`/skills`、`/skills-remote`、`/sessions`、`/runs`、
+`/observability` 和 `/system/status`。
 
 `POST /sessions/{id}/runs` 返回 `202`、`run_id` 和 `events_url`；
 `GET /runs/{id}/events` 支持 `Last-Event-ID` 或 `after` 游标。审批接口为
@@ -130,8 +138,9 @@ make verify               # Ruff、Mypy、Pytest、Vitest、build、Playwright�
 
 ## 边界
 
-首版仅绑定回环地址，面向本机单用户，不包含登录、RBAC、多租户、计费、Skill 市场、
-自主多智能体委派或拖拽式 LangGraph 编辑器。Web 搜索和远程 MCP 默认关闭。
+当前仍仅绑定回环地址并面向本机单用户。远程 Skill 目录已经开放但受允许列表与审批
+控制；登录/RBAC、多租户、计费、自主多智能体委派和拖拽式 LangGraph 编辑器将在后续
+阶段基于现有 Trace、版本和审批基础继续实现。Web 搜索和远程 MCP 默认关闭。
 
 ## 许可
 

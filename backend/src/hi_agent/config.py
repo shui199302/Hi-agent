@@ -53,6 +53,8 @@ class Settings(BaseSettings):
     sse_heartbeat_seconds: float = 15.0
     allow_remote_mcp: bool = False
     allow_skill_scripts: bool = False
+    allow_remote_skills: bool = True
+    remote_skill_catalogs: str = "vercel-labs/skills@main,openai/skills@main"
     cors_origins: str = "http://127.0.0.1:5173,http://localhost:5173"
 
     @field_validator("host")
@@ -82,6 +84,10 @@ class Settings(BaseSettings):
                 value = _project_root() / value
             self.qdrant_path = value.resolve()
         return self
+
+    @property
+    def remote_skill_catalog_list(self) -> list[str]:
+        return [item.strip() for item in self.remote_skill_catalogs.split(",") if item.strip()]
 
     @property
     def project_root(self) -> Path:

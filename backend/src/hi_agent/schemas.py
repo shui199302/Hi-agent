@@ -84,6 +84,19 @@ class KnowledgeBaseUpdate(BaseModel):
     top_k: int | None = Field(default=None, ge=1, le=50)
 
 
+class KnowledgeBaseReindex(BaseModel):
+    embedding_model: str = Field(min_length=1, max_length=250)
+    chunk_size: int = Field(ge=100, le=4000)
+    chunk_overlap: int = Field(ge=0, le=1000)
+    top_k: int = Field(ge=1, le=50)
+
+    @model_validator(mode="after")
+    def overlap_is_smaller(self) -> KnowledgeBaseReindex:
+        if self.chunk_overlap >= self.chunk_size:
+            raise ValueError("chunk_overlap must be smaller than chunk_size")
+        return self
+
+
 class KnowledgeBaseRead(ApiModel):
     id: str
     name: str
@@ -114,6 +127,7 @@ class DocumentRead(ApiModel):
 class SearchRequest(BaseModel):
     query: str = Field(min_length=1, max_length=20_000)
     top_k: int | None = Field(default=None, ge=1, le=50)
+    mode: Literal["dense", "lexical", "hybrid"] = "hybrid"
 
 
 class SearchHit(BaseModel):
@@ -123,10 +137,15 @@ class SearchHit(BaseModel):
     chunk_index: int
     content: str
     score: float
+    dense_score: float | None = None
+    lexical_score: float | None = None
+    channels: list[str] = Field(default_factory=list)
 
 
 class SearchResponse(BaseModel):
     items: list[SearchHit]
+    mode: str = "hybrid"
+    query: str = ""
 
 
 class McpServerBase(BaseModel):
@@ -254,6 +273,15 @@ class AgentRead(ApiModel):
     updated_at: datetime
 
 
+class AgentRevisionRead(ApiModel):
+    id: str
+    agent_id: str
+    version: int
+    snapshot: dict[str, Any]
+    reason: str
+    created_at: datetime
+
+
 class SkillMetadata(BaseModel):
     name: str
     description: str
@@ -268,6 +296,35 @@ class SkillDetail(SkillMetadata):
     instructions: str
     references: list[str] = Field(default_factory=list)
     assets: list[str] = Field(default_factory=list)
+
+
+class RemoteSkillRead(BaseModel):
+    catalog: str
+    repository: str
+    ref: str
+    path: str
+    name: str
+    description: str
+    source_url: str
+    has_scripts: bool = False
+    license: str | None = None
+
+
+class RemoteSkillInstall(BaseModel):
+    catalog: str = Field(min_length=1, max_length=200)
+    path: str = Field(min_length=1, max_length=500)
+    confirm: bool
+    replace: bool = False
+
+
+class SkillCreateRequest(BaseModel):
+    name: str = Field(pattern=r"^[a-z0-9]+(?:-[a-z0-9]+)*$", max_length=63)
+    description: str = Field(min_length=20, max_length=1024)
+    instructions: str = Field(min_length=20, max_length=20_000)
+    display_name: str = Field(min_length=1, max_length=80)
+    short_description: str = Field(min_length=1, max_length=160)
+    default_prompt: str = Field(min_length=1, max_length=500)
+    confirm: bool
 
 
 class SessionCreate(BaseModel):

@@ -20,7 +20,7 @@ from .config import Settings, get_settings
 from .database import configure_database, create_schema, session_factory
 from .errors import HiAgentError
 from .mcp_client import McpClient
-from .models import AgentConfig, McpServerConfig, ModelEndpoint
+from .models import AgentConfig, AgentRevision, McpServerConfig, ModelEndpoint
 from .rag import RagService
 from .runtime import RunManager
 from .skills import SkillRegistry
@@ -71,6 +71,28 @@ def _seed_defaults(settings: Settings) -> None:
                             str(settings.project_root),
                         ],
                         enabled=False,
+                    )
+                )
+        db.flush()
+        for agent in db.scalars(select(AgentConfig)).all():
+            if db.scalar(select(AgentRevision).where(AgentRevision.agent_id == agent.id).limit(1)) is None:
+                db.add(
+                    AgentRevision(
+                        agent_id=agent.id,
+                        version=1,
+                        snapshot={
+                            "name": agent.name,
+                            "description": agent.description,
+                            "system_prompt": agent.system_prompt,
+                            "model_endpoint_id": agent.model_endpoint_id,
+                            "knowledge_base_id": agent.knowledge_base_id,
+                            "skills": list(agent.skills),
+                            "mcp_servers": list(agent.mcp_servers),
+                            "tool_policy": dict(agent.tool_policy),
+                            "max_tool_loops": agent.max_tool_loops,
+                            "enabled": agent.enabled,
+                        },
+                        reason="现有配置基线",
                     )
                 )
         db.commit()

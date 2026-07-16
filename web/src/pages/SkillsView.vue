@@ -1,12 +1,13 @@
 <script setup lang="ts">
-import { computed, onActivated, onMounted, ref } from 'vue'
-import { formatApiError, listOf, request } from '../api'
+import { computed, onActivated, onMounted, reactive, ref } from 'vue'
+import { formatApiError, jsonBody, listOf, request } from '../api'
 import AppIcon from '../components/AppIcon.vue'
 import EmptyState from '../components/EmptyState.vue'
 import LoadingState from '../components/LoadingState.vue'
 import ModalDialog from '../components/ModalDialog.vue'
 import StatusBadge from '../components/StatusBadge.vue'
-import type { SkillMetadata } from '../types'
+import { notify } from '../notifications'
+import type { RemoteSkill, SkillMetadata } from '../types'
 
 interface SkillDetail extends SkillMetadata {
   instructions?: string
@@ -25,6 +26,14 @@ const query = ref('')
 const selected = ref<SkillDetail | null>(null)
 const detailOpen = ref(false)
 const detailLoading = ref(false)
+const remoteOpen = ref(false)
+const remoteQuery = ref('')
+const remoteLoading = ref(false)
+const remoteResults = ref<RemoteSkill[]>([])
+const installing = ref('')
+const creatorOpen = ref(false)
+const creating = ref(false)
+const createForm = reactive({ name: '', display_name: '', description: '', short_description: '', default_prompt: '', instructions: '# 工作流\n\n1. 明确任务目标。\n2. 执行并校验结果。' })
 
 const filtered = computed(() => {
   const value = query.value.trim().toLowerCase()
@@ -41,8 +50,42 @@ function displayName(skill: SkillMetadata): string {
     'data-analysis': '数据分析',
     'report-writing': '报告撰写',
     'task-planning': '任务规划',
+    'find-skills': '发现 Skills',
+    'skill-creator': '创建 Skill',
   }
   return skill.display_name || builtins[skill.name] || skill.name
+}
+
+async function searchRemote(): Promise<void> {
+  if (remoteQuery.value.trim().length < 2) return
+  remoteLoading.value = true
+  try {
+    remoteResults.value = await request<RemoteSkill[]>(`/skills-remote/search?q=${encodeURIComponent(remoteQuery.value.trim())}`)
+  } catch (error) { notify(formatApiError(error), 'error') }
+  finally { remoteLoading.value = false }
+}
+
+async function installRemote(skill: RemoteSkill): Promise<void> {
+  if (!window.confirm(`确认从 ${skill.repository}@${skill.ref} 安装“${skill.name}”？远程内容将先经过路径与危险内容扫描，脚本不会执行。`)) return
+  installing.value = skill.name
+  try {
+    await request('/skills-remote/install', { method: 'POST', ...jsonBody({ catalog: skill.catalog, path: skill.path, confirm: true, replace: false }) })
+    notify(`${skill.name} 已安装，尚未绑定任何智能体`, 'success')
+    await load()
+  } catch (error) { notify(formatApiError(error), 'error') }
+  finally { installing.value = '' }
+}
+
+async function createSkill(): Promise<void> {
+  creating.value = true
+  try {
+    await request('/skills', { method: 'POST', ...jsonBody({ ...createForm, confirm: true }) })
+    creatorOpen.value = false
+    notify(`${createForm.name} 已创建，尚未绑定任何智能体`, 'success')
+    Object.assign(createForm, { name: '', display_name: '', description: '', short_description: '', default_prompt: '', instructions: '# 工作流\n\n1. 明确任务目标。\n2. 执行并校验结果。' })
+    await load()
+  } catch (error) { notify(formatApiError(error), 'error') }
+  finally { creating.value = false }
 }
 
 function category(skill: SkillMetadata): string {
@@ -98,6 +141,8 @@ onActivated(() => { if (!loading.value) void load() })
         </div>
         <div class="page-actions">
           <button class="button secondary" type="button" @click="load"><AppIcon name="refresh" :size="16" />重新扫描</button>
+          <button class="button secondary" type="button" @click="remoteOpen = true"><AppIcon name="search" :size="16" />远程发现</button>
+          <button class="button" type="button" @click="creatorOpen = true"><AppIcon name="plus" :size="16" />创建 Skill</button>
           <button class="button" type="button" @click="goAgents"><AppIcon name="agents" :size="16" />配置智能体</button>
         </div>
       </header>
@@ -149,6 +194,30 @@ onActivated(() => { if (!loading.value) void load() })
         <button class="button" type="button" @click="goAgents">在智能体中启用</button>
       </template>
     </ModalDialog>
+
+    <ModalDialog :open="remoteOpen" title="远程发现 Skills" description="仅搜索已批准的 GitHub 目录；安装前进行安全扫描并要求确认" wide @close="remoteOpen = false">
+      <form class="remote-search" @submit.prevent="searchRemote"><input v-model="remoteQuery" class="input" placeholder="例如：browser automation、PDF、数据分析" /><button class="button" :disabled="remoteLoading" type="submit">{{ remoteLoading ? '搜索中…' : '搜索' }}</button></form>
+      <div v-if="remoteResults.length" class="remote-results">
+        <article v-for="skill in remoteResults" :key="`${skill.repository}-${skill.path}`">
+          <div><strong>{{ skill.name }}</strong><small>{{ skill.repository }}@{{ skill.ref }} · {{ skill.path }}</small><p>{{ skill.description }}</p></div>
+          <button class="button secondary small" :disabled="installing === skill.name" type="button" @click="installRemote(skill)">{{ installing === skill.name ? '扫描安装中…' : '审查并安装' }}</button>
+        </article>
+      </div>
+      <EmptyState v-else-if="!remoteLoading" icon="search" title="输入能力关键词" description="远程 Skill 在安装后仍需手动绑定到智能体。" />
+      <template #footer><button class="button secondary" type="button" @click="remoteOpen = false">关闭</button></template>
+    </ModalDialog>
+
+    <ModalDialog :open="creatorOpen" title="创建 Skill" description="写入严格限制在项目 skills/ 目录；脚本不会自动生成或启用" wide @close="creatorOpen = false">
+      <div class="form-grid">
+        <div class="field"><label>标准名称</label><input v-model="createForm.name" class="input" placeholder="customer-support" /></div>
+        <div class="field"><label>显示名称</label><input v-model="createForm.display_name" class="input" placeholder="客户支持" /></div>
+        <div class="field full"><label>触发描述</label><textarea v-model="createForm.description" class="textarea" placeholder="说明能力以及何时应使用该 Skill" /></div>
+        <div class="field full"><label>列表简介</label><input v-model="createForm.short_description" class="input" /></div>
+        <div class="field full"><label>默认提示</label><input v-model="createForm.default_prompt" class="input" /></div>
+        <div class="field full"><label>SKILL.md 指令</label><textarea v-model="createForm.instructions" class="textarea creator-instructions" /></div>
+      </div>
+      <template #footer><button class="button secondary" type="button" @click="creatorOpen = false">取消</button><button class="button" :disabled="creating" type="button" @click="createSkill">{{ creating ? '校验并创建中…' : '确认创建' }}</button></template>
+    </ModalDialog>
   </div>
 </template>
 
@@ -183,5 +252,14 @@ onActivated(() => { if (!loading.value) void load() })
 .detail-error { padding: 11px; color: var(--red); background: var(--red-soft); border-radius: 9px; }
 .safety-note { display: flex; align-items: flex-start; gap: 8px; padding: 11px; color: #4f6f60; font-size: 9px; line-height: 1.55; background: var(--green-soft); border-radius: 9px; }
 .safety-note svg { flex: 0 0 auto; }
+.remote-search { display: flex; gap: 9px; }
+.remote-search input { flex: 1; }
+.remote-results { display: grid; max-height: 430px; gap: 9px; margin-top: 14px; overflow: auto; }
+.remote-results article { display: flex; align-items: center; justify-content: space-between; gap: 15px; padding: 13px; border: 1px solid var(--line); border-radius: 10px; }
+.remote-results article > div { min-width: 0; }
+.remote-results strong,.remote-results small { display: block; }
+.remote-results small { margin-top: 3px; color: var(--muted); font: 8px 'DM Mono',monospace; }
+.remote-results p { margin: 7px 0 0; color: var(--muted); font-size: 9px; line-height: 1.5; }
+.creator-instructions { min-height: 180px; font-family: 'DM Mono',monospace; }
 @media (max-width: 600px) { .skill-toolbar { align-items: stretch; flex-direction: column; } .skill-count { justify-content: flex-end; } .detail-facts { grid-template-columns: 1fr; } }
 </style>
