@@ -41,12 +41,25 @@ export interface KnowledgeBase {
   description?: string
   document_count?: number
   chunk_count?: number
+  ready_document_count?: number
+  processing_document_count?: number
+  failed_document_count?: number
+  total_size_bytes?: number
+  bound_agent_count?: number
+  status?: 'empty' | 'ready' | 'processing' | 'error'
   embedding_model?: string
   chunk_size?: number
   chunk_overlap?: number
   top_k?: number
   created_at?: string
   updated_at?: string
+}
+
+export interface PagedResult<T> {
+  items: T[]
+  total: number
+  offset: number
+  limit: number
 }
 
 export interface DocumentItem {

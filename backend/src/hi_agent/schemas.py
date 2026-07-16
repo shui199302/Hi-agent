@@ -107,6 +107,12 @@ class KnowledgeBaseRead(ApiModel):
     top_k: int
     document_count: int = 0
     chunk_count: int = 0
+    ready_document_count: int = 0
+    processing_document_count: int = 0
+    failed_document_count: int = 0
+    total_size_bytes: int = 0
+    bound_agent_count: int = 0
+    status: Literal["empty", "ready", "processing", "error"] = "empty"
     created_at: datetime
     updated_at: datetime
 
@@ -122,6 +128,20 @@ class DocumentRead(ApiModel):
     error: str | None
     chunk_count: int
     created_at: datetime
+
+
+class KnowledgeBaseQueryResponse(BaseModel):
+    items: list[KnowledgeBaseRead]
+    total: int
+    offset: int
+    limit: int
+
+
+class DocumentQueryResponse(BaseModel):
+    items: list[DocumentRead]
+    total: int
+    offset: int
+    limit: int
 
 
 class SearchRequest(BaseModel):

@@ -45,8 +45,10 @@ from .schemas import (
     ApprovalDecision,
     ApprovalRead,
     CancelResponse,
+    DocumentQueryResponse,
     DocumentRead,
     KnowledgeBaseCreate,
+    KnowledgeBaseQueryResponse,
     KnowledgeBaseRead,
     KnowledgeBaseReindex,
     KnowledgeBaseUpdate,
@@ -116,16 +118,36 @@ def _skills(request: Request) -> SkillRegistry:
 
 
 def _knowledge_base_read(db: Session, kb: KnowledgeBase) -> KnowledgeBaseRead:
-    document_count, chunk_count = db.execute(
+    document_count, chunk_count, ready_count, processing_count, failed_count, total_size = db.execute(
         select(
             func.count(Document.id),
             func.coalesce(func.sum(Document.chunk_count), 0),
+            func.count(Document.id).filter(Document.status.in_(("ready", "indexed"))),
+            func.count(Document.id).filter(Document.status == "processing"),
+            func.count(Document.id).filter(Document.status.in_(("failed", "error"))),
+            func.coalesce(func.sum(Document.size_bytes), 0),
         ).where(Document.knowledge_base_id == kb.id)
     ).one()
+    bound_agent_count = db.scalar(
+        select(func.count()).select_from(AgentConfig).where(AgentConfig.knowledge_base_id == kb.id)
+    ) or 0
+    kb_status = "empty"
+    if failed_count:
+        kb_status = "error"
+    elif processing_count:
+        kb_status = "processing"
+    elif document_count:
+        kb_status = "ready"
     return KnowledgeBaseRead.model_validate(kb).model_copy(
         update={
             "document_count": int(document_count),
             "chunk_count": int(chunk_count),
+            "ready_document_count": int(ready_count),
+            "processing_document_count": int(processing_count),
+            "failed_document_count": int(failed_count),
+            "total_size_bytes": int(total_size),
+            "bound_agent_count": int(bound_agent_count),
+            "status": kb_status,
         }
     )
 
@@ -208,6 +230,39 @@ def list_knowledge_bases(db: Session = Depends(get_db)) -> list[KnowledgeBaseRea
     return [_knowledge_base_read(db, item) for item in items]
 
 
+@router.get("/knowledge-bases/query", response_model=KnowledgeBaseQueryResponse)
+def query_knowledge_bases(
+    q: str = Query(default="", max_length=200),
+    name_exact: str = Query(default="", max_length=120),
+    status_filter: str = Query(default="all", alias="status", pattern=r"^(all|empty|ready|processing|error)$"),
+    sort_by: str = Query(default="updated_at", pattern=r"^(name|created_at|updated_at|document_count)$"),
+    sort_order: str = Query(default="desc", pattern=r"^(asc|desc)$"),
+    offset: int = Query(default=0, ge=0),
+    limit: int = Query(default=20, ge=1, le=100),
+    db: Session = Depends(get_db),
+) -> KnowledgeBaseQueryResponse:
+    statement = select(KnowledgeBase)
+    if name_exact:
+        statement = statement.where(KnowledgeBase.name == name_exact)
+    elif q.strip():
+        pattern = f"%{q.strip().lower()}%"
+        statement = statement.where(
+            func.lower(KnowledgeBase.name).like(pattern) | func.lower(KnowledgeBase.description).like(pattern)
+        )
+    items = [_knowledge_base_read(db, item) for item in db.scalars(statement).all()]
+    if status_filter != "all":
+        items = [item for item in items if item.status == status_filter]
+    reverse = sort_order == "desc"
+    if sort_by == "document_count":
+        items.sort(key=lambda item: (item.document_count, item.name.lower()), reverse=reverse)
+    elif sort_by == "name":
+        items.sort(key=lambda item: item.name.lower(), reverse=reverse)
+    else:
+        items.sort(key=lambda item: getattr(item, sort_by), reverse=reverse)
+    total = len(items)
+    return KnowledgeBaseQueryResponse(items=items[offset : offset + limit], total=total, offset=offset, limit=limit)
+
+
 @router.post("/knowledge-bases", response_model=KnowledgeBaseRead, status_code=status.HTTP_201_CREATED)
 def create_knowledge_base(
     request: Request, payload: KnowledgeBaseCreate, db: Session = Depends(get_db)
@@ -262,6 +317,34 @@ def list_documents(kb_id: str, db: Session = Depends(get_db)) -> list[Document]:
             select(Document).where(Document.knowledge_base_id == kb_id).order_by(Document.created_at.desc())
         ).all()
     )
+
+
+@router.get("/knowledge-bases/{kb_id}/documents/query", response_model=DocumentQueryResponse)
+def query_documents(
+    kb_id: str,
+    q: str = Query(default="", max_length=255),
+    filename_exact: str = Query(default="", max_length=255),
+    status_filter: str = Query(default="all", alias="status", pattern=r"^(all|processing|ready|indexed|failed|error)$"),
+    sort_by: str = Query(default="created_at", pattern=r"^(filename|created_at|size_bytes|chunk_count)$"),
+    sort_order: str = Query(default="desc", pattern=r"^(asc|desc)$"),
+    offset: int = Query(default=0, ge=0),
+    limit: int = Query(default=20, ge=1, le=100),
+    db: Session = Depends(get_db),
+) -> DocumentQueryResponse:
+    _get(db, KnowledgeBase, kb_id, "KnowledgeBase")
+    statement = select(Document).where(Document.knowledge_base_id == kb_id)
+    if filename_exact:
+        statement = statement.where(Document.filename == filename_exact)
+    elif q.strip():
+        statement = statement.where(func.lower(Document.filename).like(f"%{q.strip().lower()}%"))
+    if status_filter != "all":
+        statuses = ("failed", "error") if status_filter in {"failed", "error"} else (status_filter,)
+        statement = statement.where(Document.status.in_(statuses))
+    sort_column = getattr(Document, sort_by)
+    statement = statement.order_by(sort_column.desc() if sort_order == "desc" else sort_column.asc(), Document.id)
+    total = db.scalar(select(func.count()).select_from(statement.order_by(None).subquery())) or 0
+    items = [DocumentRead.model_validate(item) for item in db.scalars(statement.offset(offset).limit(limit)).all()]
+    return DocumentQueryResponse(items=items, total=int(total), offset=offset, limit=limit)
 
 
 @router.post(

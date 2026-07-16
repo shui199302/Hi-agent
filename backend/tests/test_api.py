@@ -82,6 +82,33 @@ def test_health_crud_rag_run_and_resumable_events(client: TestClient) -> None:
     assert "dense" in search.json()["items"][0]["channels"]
     assert "lexical" in search.json()["items"][0]["channels"]
 
+    edited = client.patch(
+        f"/api/v1/knowledge-bases/{kb_id}",
+        json={"name": "城市资料库", "description": "城市文档与旅行资料"},
+    )
+    assert edited.status_code == 200, edited.text
+    assert edited.json()["name"] == "城市资料库"
+    assert edited.json()["description"] == "城市文档与旅行资料"
+    assert edited.json()["status"] == "ready"
+    assert edited.json()["ready_document_count"] == 1
+    assert edited.json()["total_size_bytes"] > 0
+
+    exact_query = client.get("/api/v1/knowledge-bases/query", params={"name_exact": "城市资料库"})
+    assert exact_query.status_code == 200, exact_query.text
+    assert exact_query.json()["total"] == 1
+    assert exact_query.json()["items"][0]["id"] == kb_id
+    assert client.get(
+        "/api/v1/knowledge-bases/query", params={"name_exact": "城市资料", "status": "ready"}
+    ).json()["total"] == 0
+
+    document_query = client.get(
+        f"/api/v1/knowledge-bases/{kb_id}/documents/query",
+        params={"filename_exact": "guide.md", "limit": 1},
+    )
+    assert document_query.status_code == 200, document_query.text
+    assert document_query.json()["total"] == 1
+    assert document_query.json()["items"][0]["filename"] == "guide.md"
+
     rebuilt = client.post(
         f"/api/v1/knowledge-bases/{kb_id}/reindex",
         json={"embedding_model": "test-embedding", "chunk_size": 120, "chunk_overlap": 20, "top_k": 4},
