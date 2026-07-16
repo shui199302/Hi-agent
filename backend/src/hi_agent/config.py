@@ -56,6 +56,13 @@ class Settings(BaseSettings):
     allow_remote_skills: bool = True
     remote_skill_catalogs: str = "vercel-labs/skills@main,openai/skills@main"
     cors_origins: str = "http://127.0.0.1:5173,http://localhost:5173"
+    auth_mode: Literal["development", "production"] = "development"
+    auth_session_days: int = Field(default=14, ge=1, le=90)
+    auth_cookie_secure: bool = False
+    auth_bootstrap_username: str = "初始化管理员"
+    auth_otp_ttl_seconds: int = Field(default=300, ge=60, le=900)
+    auth_otp_resend_seconds: int = Field(default=60, ge=30, le=300)
+    auth_otp_max_attempts: int = Field(default=5, ge=3, le=10)
 
     @field_validator("host")
     @classmethod
@@ -83,6 +90,8 @@ class Settings(BaseSettings):
             if not value.is_absolute():
                 value = _project_root() / value
             self.qdrant_path = value.resolve()
+        if self.auth_mode == "production" and not self.auth_cookie_secure:
+            raise ValueError("HI_AGENT_AUTH_COOKIE_SECURE must be true in production mode")
         return self
 
     @property
@@ -126,6 +135,10 @@ class Settings(BaseSettings):
     def ensure_directories(self) -> None:
         for directory in (self.data_dir, self.vectors_dir, self.uploads_dir):
             directory.mkdir(parents=True, exist_ok=True)
+
+    @property
+    def mock_auth_enabled(self) -> bool:
+        return self.auth_mode == "development"
 
     def resolve_secret(self, env_name: str) -> str:
         """Resolve a secret without adding it to settings dumps, logs, or persistence.

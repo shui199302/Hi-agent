@@ -1,5 +1,29 @@
 export type Id = string
 
+export interface UserProfile {
+  id: Id
+  username: string
+  phone?: string | null
+  role: 'admin' | 'user' | string
+  status: string
+  wechat_nickname?: string | null
+  avatar_url?: string | null
+  created_at: string
+  last_login_at?: string | null
+}
+
+export interface AuthConfig {
+  mode: 'development' | 'production'
+  mock_phone_enabled: boolean
+  mock_wechat_enabled: boolean
+  provider_notice: string
+}
+
+export interface AuthResult {
+  user: UserProfile
+  csrf_token: string
+}
+
 export interface ModelEndpoint {
   id: Id
   name: string

@@ -3,6 +3,24 @@ import { expect, test } from '@playwright/test'
 test.beforeEach(async ({ page }) => {
   await page.route('**/api/v1/**', async (route) => {
     const url = new URL(route.request().url())
+    if (url.pathname.endsWith('/auth/me')) {
+      await route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({
+          id: 'user-1', username: '测试管理员', role: 'admin', status: 'active', created_at: new Date().toISOString(),
+        }),
+      })
+      return
+    }
+    if (url.pathname.endsWith('/knowledge-bases/query')) {
+      await route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({ items: [], total: 0, offset: 0, limit: 20 }),
+      })
+      return
+    }
     if (url.pathname.endsWith('/system/status')) {
       await route.fulfill({
         status: 200,
@@ -27,7 +45,7 @@ test('renders the Chinese console shell and navigates between major areas', asyn
 
   await page.getByRole('button', { name: /知识库/ }).first().click()
   await expect(page).toHaveURL(/#\/knowledge$/)
-  await expect(page.getByRole('heading', { name: '知识库', exact: true })).toBeVisible()
+  await expect(page.getByRole('heading', { name: '知识库列表', exact: true })).toBeVisible()
 
   await page.getByRole('button', { name: /模型与系统/ }).first().click()
   await expect(page).toHaveURL(/#\/models$/)

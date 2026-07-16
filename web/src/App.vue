@@ -3,7 +3,7 @@ import { computed, defineAsyncComponent, onBeforeUnmount, onMounted, ref } from 
 import { request } from './api'
 import AppIcon from './components/AppIcon.vue'
 import { dismissNotice, notificationState } from './notifications'
-import type { SystemStatus } from './types'
+import type { SystemStatus, UserProfile } from './types'
 
 const ChatView = defineAsyncComponent(() => import('./pages/ChatView.vue'))
 const AgentsView = defineAsyncComponent(() => import('./pages/AgentsView.vue'))
@@ -12,6 +12,7 @@ const McpView = defineAsyncComponent(() => import('./pages/McpView.vue'))
 const SkillsView = defineAsyncComponent(() => import('./pages/SkillsView.vue'))
 const ModelsView = defineAsyncComponent(() => import('./pages/ModelsView.vue'))
 const OperationsView = defineAsyncComponent(() => import('./pages/OperationsView.vue'))
+const LoginView = defineAsyncComponent(() => import('./pages/LoginView.vue'))
 
 const navigation = [
   { id: 'chat', label: '对话', hint: '运行智能体', icon: 'chat', component: ChatView },
@@ -28,6 +29,8 @@ const mobileNavOpen = ref(false)
 const systemOnline = ref<boolean | null>(null)
 const status = ref<SystemStatus | null>(null)
 let statusTimer: number | undefined
+const authLoading = ref(true)
+const user = ref<UserProfile | null>(null)
 
 const current = computed(() => navigation.find((item) => item.id === active.value) ?? navigation[0])
 
@@ -43,6 +46,7 @@ function navigate(id: string): void {
 }
 
 async function refreshStatus(): Promise<void> {
+  if (!user.value) return
   try {
     status.value = await request<SystemStatus>('/system/status')
     systemOnline.value = true
@@ -51,9 +55,36 @@ async function refreshStatus(): Promise<void> {
   }
 }
 
-onMounted(() => {
+async function refreshUser(): Promise<void> {
+  try {
+    user.value = await request<UserProfile>('/auth/me')
+  } catch {
+    user.value = null
+  } finally {
+    authLoading.value = false
+  }
+}
+
+function authenticated(profile: UserProfile): void {
+  user.value = profile
+  authLoading.value = false
+  void refreshStatus()
+}
+
+async function logout(): Promise<void> {
+  try {
+    await request('/auth/logout', { method: 'POST' })
+  } finally {
+    user.value = null
+    status.value = null
+    systemOnline.value = null
+  }
+}
+
+onMounted(async () => {
   syncHash()
   window.addEventListener('hashchange', syncHash)
+  await refreshUser()
   void refreshStatus()
   statusTimer = window.setInterval(refreshStatus, 30_000)
 })
@@ -65,7 +96,9 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
-  <div class="app-shell">
+  <div v-if="authLoading" class="auth-loading"><span class="spinner" /><strong>正在验证本地登录状态…</strong></div>
+  <LoginView v-else-if="!user" @authenticated="authenticated" />
+  <div v-else class="app-shell">
     <div v-if="mobileNavOpen" class="mobile-scrim" @click="mobileNavOpen = false" />
     <aside class="sidebar" :class="{ 'sidebar-open': mobileNavOpen }">
       <div class="brand">
@@ -102,6 +135,11 @@ onBeforeUnmount(() => {
       </nav>
 
       <div class="sidebar-footer">
+        <div class="account-card">
+          <span class="account-avatar">{{ user?.username?.slice(0, 1) }}</span>
+          <div><strong>{{ user?.username }}</strong><span>{{ user?.role === 'admin' ? '管理员' : '个人账号' }}</span></div>
+          <button class="account-logout" type="button" @click="logout">退出</button>
+        </div>
         <div class="service-indicator">
           <span class="service-dot" :class="systemOnline === true ? 'online' : systemOnline === false ? 'offline' : ''" />
           <div>

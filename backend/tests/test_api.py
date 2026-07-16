@@ -265,6 +265,86 @@ def test_validation_and_not_found_are_structured(client: TestClient) -> None:
     assert missing.json()["error"]["code"] == "NOT_FOUND"
 
 
+def test_authentication_csrf_and_user_resource_isolation(client: TestClient) -> None:
+    original = client.post(
+        "/api/v1/models",
+        json={"name": "隔离模型", "base_url": "http://mock.local/v1", "model": "mock", "mock": True},
+    )
+    assert original.status_code == 201, original.text
+
+    other = TestClient(client.app)
+    assert other.get("/api/v1/models").status_code == 401
+    issued = other.post(
+        "/api/v1/auth/phone/code", json={"phone": "13900000000", "purpose": "register"}
+    )
+    registered = other.post(
+        "/api/v1/auth/phone/register",
+        json={"phone": "13900000000", "code": issued.json()["debug_code"], "username": "隔离用户"},
+    )
+    assert registered.status_code == 200, registered.text
+    other.headers["X-CSRF-Token"] = registered.json()["csrf_token"]
+    assert other.get("/api/v1/models").json() == []
+    assert other.get(f"/api/v1/models/{original.json()['id']}").status_code == 404
+    forbidden_secret = other.post(
+        "/api/v1/models",
+        json={"name": "越权密钥", "base_url": "http://mock.local/v1", "model": "other", "mock": True},
+    )
+    assert forbidden_secret.status_code == 403
+    secret_prefix = f"HI_AGENT_USER_{registered.json()['user']['id'].replace('-', '').upper()}_"
+    same_name = other.post(
+        "/api/v1/models",
+        json={
+            "name": "隔离模型",
+            "base_url": "http://mock.local/v1",
+            "model": "other",
+            "api_key_env": f"{secret_prefix}MODEL_KEY",
+            "mock": True,
+        },
+    )
+    assert same_name.status_code == 201, same_name.text
+    assert [item["id"] for item in client.get("/api/v1/models").json()] == [original.json()["id"]]
+
+    csrf_missing = TestClient(client.app)
+    csrf_missing.cookies.update(other.cookies)
+    rejected = csrf_missing.post(
+        "/api/v1/models",
+        json={"name": "无 CSRF", "base_url": "http://mock.local/v1", "model": "mock", "mock": True},
+    )
+    assert rejected.status_code == 403
+    assert rejected.json()["error"]["code"] == "CSRF_INVALID"
+    other.close()
+    csrf_missing.close()
+
+
+def test_mock_wechat_registration_profile_and_login(client: TestClient) -> None:
+    challenge = client.post("/api/v1/auth/wechat/challenges", json={"purpose": "register"}).json()
+    authorized = client.post(
+        f"/api/v1/auth/wechat/challenges/{challenge['challenge_id']}/mock-authorize",
+        json={"ticket": challenge["ticket"], "nickname": "微信测试用户", "mock_account": "api-test"},
+    )
+    assert authorized.status_code == 200
+    completed = client.post(
+        f"/api/v1/auth/wechat/challenges/{challenge['challenge_id']}/complete",
+        json={"ticket": challenge["ticket"]},
+    )
+    assert completed.status_code == 200, completed.text
+    assert completed.json()["user"]["wechat_nickname"] == "微信测试用户"
+    client.headers["X-CSRF-Token"] = completed.json()["csrf_token"]
+    assert client.post("/api/v1/auth/logout").status_code == 204
+
+    login = client.post("/api/v1/auth/wechat/challenges", json={"purpose": "login"}).json()
+    client.post(
+        f"/api/v1/auth/wechat/challenges/{login['challenge_id']}/mock-authorize",
+        json={"ticket": login["ticket"], "nickname": "微信测试用户", "mock_account": "api-test"},
+    )
+    result = client.post(
+        f"/api/v1/auth/wechat/challenges/{login['challenge_id']}/complete",
+        json={"ticket": login["ticket"]},
+    )
+    assert result.status_code == 200, result.text
+    assert result.json()["user"]["wechat_nickname"] == "微信测试用户"
+
+
 def test_spa_fallback_never_swallows_unknown_api(settings: Settings) -> None:
     settings.web_dist_dir.mkdir(parents=True)
     (settings.web_dist_dir / "index.html").write_text("<!doctype html><title>Hi-agent SPA</title>", encoding="utf-8")

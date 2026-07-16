@@ -12,7 +12,7 @@ import pytest
 
 from hi_agent import config as config_module
 from hi_agent.config import Settings
-from hi_agent.database import configure_database, create_schema, session_factory
+from hi_agent.database import configure_database, create_schema, initialize_tenancy, session_factory
 from hi_agent.errors import HiAgentError
 from hi_agent.llm import OpenAICompatibleChatModel, _wire_tool_name
 from hi_agent.mcp_client import McpClient, _tool_risk
@@ -592,7 +592,9 @@ async def test_llm_retries_transient_status_but_not_after_partial_stream(
 async def test_shutdown_interrupts_but_user_cancel_stays_cancelled(settings: Settings) -> None:
     configure_database(settings)
     create_schema()
+    owner_id = initialize_tenancy(settings)
     with session_factory()() as db:
+        db.info["owner_id"] = owner_id
         agent = AgentConfig(name="shutdown-agent")
         db.add(agent)
         db.flush()
@@ -625,6 +627,7 @@ async def test_shutdown_interrupts_but_user_cancel_stays_cancelled(settings: Set
         assert interrupted.status == RunStatus.interrupted.value
         assert interrupted.error_code == "RUN_INTERRUPTED"
         cancelled_run = Run(
+            owner_id=interrupted.owner_id,
             session_id=interrupted.session_id,
             agent_id=interrupted.agent_id,
             status=RunStatus.running.value,

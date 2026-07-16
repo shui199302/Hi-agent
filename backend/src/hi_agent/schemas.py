@@ -22,6 +22,75 @@ class ErrorResponse(BaseModel):
     error: ErrorBody
 
 
+class UserRead(ApiModel):
+    id: str
+    username: str
+    phone: str | None
+    role: str
+    status: str
+    wechat_nickname: str | None
+    avatar_url: str | None
+    created_at: datetime
+    last_login_at: datetime | None
+
+
+class AuthConfig(BaseModel):
+    mode: Literal["development", "production"]
+    mock_phone_enabled: bool
+    mock_wechat_enabled: bool
+    provider_notice: str
+
+
+class OtpRequest(BaseModel):
+    phone: str = Field(min_length=11, max_length=20)
+    purpose: Literal["register", "login"]
+
+
+class OtpIssued(BaseModel):
+    challenge_id: str
+    expires_in: int
+    resend_after: int
+    debug_code: str | None = None
+
+
+class PhoneRegister(BaseModel):
+    phone: str = Field(min_length=11, max_length=20)
+    code: str = Field(pattern=r"^\d{6}$")
+    username: str = Field(min_length=2, max_length=80)
+
+
+class PhoneLogin(BaseModel):
+    phone: str = Field(min_length=11, max_length=20)
+    code: str = Field(pattern=r"^\d{6}$")
+
+
+class WechatChallengeCreate(BaseModel):
+    purpose: Literal["register", "login"]
+
+
+class WechatChallengeRead(BaseModel):
+    challenge_id: str
+    ticket: str
+    status: str
+    expires_in: int
+    mock: bool
+
+
+class WechatMockAuthorize(BaseModel):
+    ticket: str = Field(min_length=20, max_length=300)
+    nickname: str = Field(default="Hi-agent 微信用户", min_length=1, max_length=80)
+    mock_account: str = Field(default="default", min_length=1, max_length=80)
+
+
+class WechatComplete(BaseModel):
+    ticket: str = Field(min_length=20, max_length=300)
+
+
+class AuthResult(BaseModel):
+    user: UserRead
+    csrf_token: str
+
+
 class ModelEndpointBase(BaseModel):
     name: str = Field(min_length=1, max_length=120)
     base_url: AnyHttpUrl

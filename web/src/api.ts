@@ -47,12 +47,21 @@ export async function request<T>(path: string, init: RequestInit = {}): Promise<
     headers.set('Content-Type', 'application/json')
   }
   headers.set('Accept', 'application/json')
+  const method = (init.method ?? 'GET').toUpperCase()
+  if (!['GET', 'HEAD', 'OPTIONS'].includes(method)) {
+    const csrf = document.cookie
+      .split('; ')
+      .find((item) => item.startsWith('hi_agent_csrf='))
+      ?.split('=')[1]
+    if (csrf) headers.set('X-CSRF-Token', decodeURIComponent(csrf))
+  }
 
   let response: Response
   try {
     response = await fetch(path.startsWith('http') ? path : `${API_BASE}${path}`, {
       ...init,
       headers,
+      credentials: 'same-origin',
     })
   } catch (error) {
     throw new ApiError(

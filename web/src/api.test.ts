@@ -35,4 +35,15 @@ describe('API client', () => {
     vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new TypeError('connection refused')))
     await expect(request('/sessions')).rejects.toMatchObject({ code: 'NETWORK_ERROR', status: 0 })
   })
+
+  it('sends the double-submit CSRF token for mutations', async () => {
+    document.cookie = 'hi_agent_csrf=test-csrf-token; path=/'
+    const fetchMock = vi.fn().mockResolvedValue(new Response(undefined, { status: 204 }))
+    vi.stubGlobal('fetch', fetchMock)
+
+    await request('/auth/logout', { method: 'POST' })
+    const options = fetchMock.mock.calls[0][1] as RequestInit
+    expect(options.credentials).toBe('same-origin')
+    expect((options.headers as Headers).get('X-CSRF-Token')).toBe('test-csrf-token')
+  })
 })

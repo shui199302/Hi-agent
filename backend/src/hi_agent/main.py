@@ -16,8 +16,9 @@ from sqlalchemy.exc import IntegrityError
 
 from . import __version__
 from .api import router
+from .auth import public_auth_router
 from .config import Settings, get_settings
-from .database import configure_database, create_schema, session_factory
+from .database import configure_database, create_schema, initialize_tenancy, session_factory
 from .errors import HiAgentError
 from .mcp_client import McpClient
 from .models import AgentConfig, AgentRevision, McpServerConfig, ModelEndpoint
@@ -26,7 +27,7 @@ from .runtime import RunManager
 from .skills import SkillRegistry
 
 
-def _seed_defaults(settings: Settings) -> None:
+def _seed_defaults(settings: Settings, owner_id: str) -> None:
     """Create a usable first agent without inventing a cloud fallback."""
 
     from sqlalchemy import select
@@ -36,6 +37,7 @@ def _seed_defaults(settings: Settings) -> None:
             endpoint = None
             if settings.llm_model:
                 endpoint = ModelEndpoint(
+                    owner_id=owner_id,
                     name="环境变量模型",
                     base_url=settings.llm_base_url,
                     model=settings.llm_model,
@@ -45,6 +47,7 @@ def _seed_defaults(settings: Settings) -> None:
                 db.flush()
             db.add(
                 AgentConfig(
+                    owner_id=owner_id,
                     name="默认助手",
                     description="Hi-agent 默认本地助手",
                     model_endpoint_id=endpoint.id if endpoint else None,
@@ -61,6 +64,7 @@ def _seed_defaults(settings: Settings) -> None:
             if executable.is_file() and not executable.is_symlink() and os.access(executable, os.X_OK):
                 db.add(
                     McpServerConfig(
+                        owner_id=owner_id,
                         name="workspace",
                         transport="stdio",
                         command=str(executable.resolve()),
@@ -106,7 +110,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         settings.ensure_directories()
         create_schema()
-        _seed_defaults(settings)
+        owner_id = initialize_tenancy(settings)
+        _seed_defaults(settings, owner_id)
         manager = RunManager(settings)
         await manager.initialize()
         app.state.settings = settings
@@ -132,10 +137,16 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.add_middleware(
         CORSMiddleware,
         allow_origins=settings.cors_origin_list,
-        allow_credentials=False,
+        allow_credentials=True,
         allow_methods=["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
-        allow_headers=["Content-Type", "Last-Event-ID"],
+        allow_headers=["Content-Type", "Last-Event-ID", "X-CSRF-Token"],
     )
+
+    @app.get("/api/v1/health", tags=["系统"])
+    def health() -> dict[str, str]:
+        return {"status": "ok", "version": __version__}
+
+    app.include_router(public_auth_router)
     app.include_router(router)
 
     @app.api_route(

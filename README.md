@@ -1,6 +1,6 @@
 # Hi-agent
 
-Hi-agent 是一套 localhost 单用户智能体运行平台，包含 Vue 3 中文控制台、FastAPI
+Hi-agent 是一套 localhost 多用户隔离的智能体运行平台，包含 Vue 3 中文控制台、FastAPI
 REST/SSE、LangGraph、带引用的本地 RAG、MCP 客户端与示例服务器、Agent Skills，
 以及独立的 Linux/NVIDIA vLLM 部署配置。
 
@@ -19,6 +19,7 @@ REST/SSE、LangGraph、带引用的本地 RAG、MCP 客户端与示例服务器�
 - 九个原创 Skills，包括知识库问答、分析写作、`find-skills` 和 `skill-creator`；远程目录安装经过允许列表、暂存、安全扫描和人工确认。
 - Agent 配置版本与恢复、最近 100 次 Run 的状态/耗时/工具/RAG Trace 汇总。
 - 模型端点、Agent、知识库、MCP、Skills、会话与系统状态的中文 Web 管理界面。
+- 手机验证码与微信扫码登录界面、本地安全会话、初始化管理员迁移和逐用户资源隔离。
 - Linux/NVIDIA vLLM Compose 固定 `vllm/vllm-openai:v0.23.0`；Mac 仅作为 `/v1` 客户端。
 
 ## 目录
@@ -61,6 +62,21 @@ HI_AGENT_LLM_API_KEY_ENV=HI_AGENT_LLM_API_KEY
 数据库与 API 只保存环境变量名，不保存密钥值。密钥不会写入日志、浏览器存储或
 API 响应。未配置或无法连接模型时，平台不会静默切换到云服务，而会返回
 `MODEL_UNAVAILABLE` 并保留已生成内容。
+
+## 登录与用户隔离
+
+首次注册的手机号或微信身份会认领“初始化管理员”账号，升级前已有的 Agent、知识库、
+文档、会话、Run、模型端点和 MCP 配置均自动归属该管理员。后续用户只能查询和操作
+自己的资源；跨用户直接访问返回 404，避免泄露资源是否存在。
+
+当前 `.env.example` 使用 `HI_AGENT_AUTH_MODE=development`，手机号验证码会直接显示在
+登录页面，微信扫码由页面按钮模拟授权。模拟 Provider 只负责替代腾讯短信和微信开放
+平台，账号、身份映射、随机会话令牌、HttpOnly Cookie、CSRF 校验、验证码过期/限频/
+尝试锁定和认证审计均使用正式实现。接入真实服务后将模式改为 `production`；系统会
+关闭所有模拟授权并在 Provider 未配置时失败关闭，同时必须设置
+`HI_AGENT_AUTH_COOKIE_SECURE=true` 并通过 HTTPS 访问。认证密钥只允许放在 `.env`。
+普通用户的模型密钥环境变量必须使用平台返回的个人命名空间前缀；stdio MCP、MCP
+环境变量以及全局 Skill 安装/创建仅允许管理员操作，避免跨用户读取服务端凭据或执行代码。
 
 ## RAG 与引用
 
@@ -116,7 +132,7 @@ parallel、最大上下文和显存占用。模型权重、模型许可与显存
 
 ## API
 
-REST 统一前缀为 `/api/v1`，覆盖 `/models`、`/agents`、`/knowledge-bases`、
+REST 统一前缀为 `/api/v1`，覆盖 `/auth`、`/models`、`/agents`、`/knowledge-bases`、
 `/documents`、`/mcp/servers`、`/skills`、`/skills-remote`、`/sessions`、`/runs`、
 `/observability` 和 `/system/status`。
 
@@ -138,9 +154,9 @@ make verify               # Ruff、Mypy、Pytest、Vitest、build、Playwright�
 
 ## 边界
 
-当前仍仅绑定回环地址并面向本机单用户。远程 Skill 目录已经开放但受允许列表与审批
-控制；登录/RBAC、多租户、计费、自主多智能体委派和拖拽式 LangGraph 编辑器将在后续
-阶段基于现有 Trace、版本和审批基础继续实现。Web 搜索和远程 MCP 默认关闭。
+当前仍仅绑定回环地址。平台已实现用户认证和个人资源隔离，但尚未提供组织、团队共享、
+细粒度 RBAC、租户管理、计费、自主多智能体委派或拖拽式 LangGraph 编辑器。远程 Skill
+目录已经开放但受允许列表与审批控制；Web 搜索和远程 MCP 默认关闭。
 
 ## 许可
 

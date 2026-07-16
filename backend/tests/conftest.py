@@ -65,4 +65,15 @@ def settings(tmp_path: Path) -> Settings:
 def client(settings: Settings) -> Iterator[TestClient]:
     app = create_app(settings)
     with TestClient(app) as test_client:
+        issued = test_client.post(
+            "/api/v1/auth/phone/code",
+            json={"phone": "13800000000", "purpose": "register"},
+        )
+        assert issued.status_code == 200, issued.text
+        registered = test_client.post(
+            "/api/v1/auth/phone/register",
+            json={"phone": "13800000000", "code": issued.json()["debug_code"], "username": "测试管理员"},
+        )
+        assert registered.status_code == 200, registered.text
+        test_client.headers["X-CSRF-Token"] = registered.json()["csrf_token"]
         yield test_client

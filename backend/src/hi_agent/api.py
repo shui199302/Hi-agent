@@ -16,6 +16,7 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from . import __version__
+from .auth import CurrentUser, current_user, require_admin, require_csrf
 from .database import get_db
 from .errors import ConflictError, HiAgentError, NotFoundError
 from .mcp_client import McpClient
@@ -33,6 +34,7 @@ from .models import (
     Run,
     RunEvent,
     RunStatus,
+    User,
     now_utc,
 )
 from .rag import RagService
@@ -78,7 +80,7 @@ from .schemas import (
 )
 from .skills import SkillRegistry
 
-router = APIRouter(prefix="/api/v1")
+router = APIRouter(prefix="/api/v1", dependencies=[Depends(current_user), Depends(require_csrf)])
 
 
 def _get[ModelT](db: Session, model: type[ModelT], item_id: str, label: str) -> ModelT:
@@ -115,6 +117,23 @@ def _mcp(request: Request) -> McpClient:
 
 def _skills(request: Request) -> SkillRegistry:
     return cast(SkillRegistry, request.app.state.skill_registry)
+
+
+def _owner_id(request: Request) -> str:
+    return str(request.state.user.id)
+
+
+def _validate_user_secret_reference(user: User, env_name: str) -> None:
+    if user.role == "admin":
+        return
+    prefix = f"HI_AGENT_USER_{user.id.replace('-', '').upper()}_"
+    if not env_name.startswith(prefix):
+        raise HiAgentError(
+            "SECRET_REFERENCE_FORBIDDEN",
+            "普通用户只能引用分配给自己命名空间的环境变量",
+            status_code=403,
+            details={"required_prefix": prefix},
+        )
 
 
 def _knowledge_base_read(db: Session, kb: KnowledgeBase) -> KnowledgeBaseRead:
@@ -173,11 +192,6 @@ def _save_agent_revision(db: Session, agent: AgentConfig, reason: str) -> None:
     db.commit()
 
 
-@router.get("/health")
-def health() -> dict[str, str]:
-    return {"status": "ok", "version": __version__}
-
-
 @router.get("/system/status", response_model=SystemStatus)
 def system_status(request: Request, db: Session = Depends(get_db)) -> SystemStatus:
     active = db.scalar(select(func.count()).select_from(Run).where(Run.status.in_(ACTIVE_RUN_STATUSES))) or 0
@@ -203,7 +217,8 @@ def list_models(db: Session = Depends(get_db)) -> list[ModelEndpoint]:
 
 
 @router.post("/models", response_model=ModelEndpointRead, status_code=status.HTTP_201_CREATED)
-def create_model(payload: ModelEndpointCreate, db: Session = Depends(get_db)) -> ModelEndpoint:
+def create_model(payload: ModelEndpointCreate, user: CurrentUser, db: Session = Depends(get_db)) -> ModelEndpoint:
+    _validate_user_secret_reference(user, payload.api_key_env)
     return _commit(db, ModelEndpoint(**payload.model_dump(mode="json")))
 
 
@@ -213,7 +228,11 @@ def get_model(model_id: str, db: Session = Depends(get_db)) -> ModelEndpoint:
 
 
 @router.patch("/models/{model_id}", response_model=ModelEndpointRead)
-def update_model(model_id: str, payload: ModelEndpointUpdate, db: Session = Depends(get_db)) -> ModelEndpoint:
+def update_model(
+    model_id: str, payload: ModelEndpointUpdate, user: CurrentUser, db: Session = Depends(get_db)
+) -> ModelEndpoint:
+    if payload.api_key_env:
+        _validate_user_secret_reference(user, payload.api_key_env)
     return _commit(db, _apply(_get(db, ModelEndpoint, model_id, "ModelEndpoint"), payload))
 
 
@@ -374,6 +393,7 @@ async def upload_document(
 
     def ingest_in_worker() -> Document:
         with session_factory_for_request()() as worker_db:
+            worker_db.info["owner_id"] = _owner_id(request)
             worker_kb = _get(worker_db, KnowledgeBase, kb_id, "KnowledgeBase")
             document = rag_service.ingest(
                 worker_db,
@@ -547,7 +567,13 @@ def list_mcp_servers(db: Session = Depends(get_db)) -> list[McpServerConfig]:
 
 
 @router.post("/mcp/servers", response_model=McpServerRead, status_code=status.HTTP_201_CREATED)
-def create_mcp_server(payload: McpServerCreate, db: Session = Depends(get_db)) -> McpServerConfig:
+def create_mcp_server(payload: McpServerCreate, user: CurrentUser, db: Session = Depends(get_db)) -> McpServerConfig:
+    if user.role != "admin" and (payload.transport == "stdio" or payload.env_refs):
+        raise HiAgentError(
+            "MCP_CONFIG_FORBIDDEN",
+            "普通用户只能创建不含环境变量的 Streamable HTTP MCP 配置",
+            status_code=403,
+        )
     return _commit(db, McpServerConfig(**payload.model_dump(mode="json")))
 
 
@@ -557,7 +583,11 @@ def get_mcp_server(server_id: str, db: Session = Depends(get_db)) -> McpServerCo
 
 
 @router.patch("/mcp/servers/{server_id}", response_model=McpServerRead)
-def update_mcp_server(server_id: str, payload: McpServerUpdate, db: Session = Depends(get_db)) -> McpServerConfig:
+def update_mcp_server(
+    server_id: str, payload: McpServerUpdate, user: CurrentUser, db: Session = Depends(get_db)
+) -> McpServerConfig:
+    if user.role != "admin" and payload.env_refs:
+        raise HiAgentError("MCP_CONFIG_FORBIDDEN", "普通用户不能配置 MCP 环境变量", status_code=403)
     server = _get(db, McpServerConfig, server_id, "McpServer")
     updated = _apply(server, payload)
     if updated.transport == "stdio" and not updated.command:
@@ -606,14 +636,16 @@ def search_remote_skills(request: Request, q: str = Query(min_length=2, max_leng
 
 
 @router.post("/skills-remote/install", response_model=SkillMetadata, status_code=status.HTTP_201_CREATED)
-def install_remote_skill(request: Request, payload: RemoteSkillInstall) -> SkillMetadata:
+def install_remote_skill(
+    request: Request, payload: RemoteSkillInstall, _: User = Depends(require_admin)
+) -> SkillMetadata:
     return _skills(request).install_remote(
         payload.catalog, payload.path, confirm=payload.confirm, replace=payload.replace
     )
 
 
 @router.post("/skills", response_model=SkillMetadata, status_code=status.HTTP_201_CREATED)
-def create_skill(request: Request, payload: SkillCreateRequest) -> SkillMetadata:
+def create_skill(request: Request, payload: SkillCreateRequest, _: User = Depends(require_admin)) -> SkillMetadata:
     return _skills(request).create_skill(payload)
 
 
@@ -725,6 +757,7 @@ async def stream_run_events(
     last_event_id: str | None = Header(default=None, alias="Last-Event-ID"),
 ) -> StreamingResponse:
     with session_factory_for_request()() as db:
+        db.info["owner_id"] = _owner_id(request)
         _get(db, Run, run_id, "Run")
     cursor = after
     if last_event_id:
@@ -740,6 +773,7 @@ async def stream_run_events(
             if await request.is_disconnected():
                 return
             with session_factory_for_request()() as db:
+                db.info["owner_id"] = _owner_id(request)
                 items = db.scalars(
                     select(RunEvent)
                     .where(RunEvent.run_id == run_id, RunEvent.id > cursor)
@@ -778,7 +812,8 @@ def session_factory_for_request() -> Any:
 
 
 @router.post("/runs/{run_id}/cancel", response_model=CancelResponse)
-async def cancel_run(request: Request, run_id: str) -> CancelResponse:
+async def cancel_run(request: Request, run_id: str, db: Session = Depends(get_db)) -> CancelResponse:
+    _get(db, Run, run_id, "Run")
     result = await _manager(request).cancel(run_id)
     return CancelResponse(run_id=run_id, status=result)
 
@@ -795,7 +830,9 @@ async def decide_approval(
     run_id: str,
     approval_id: str,
     payload: ApprovalDecision,
+    db: Session = Depends(get_db),
 ) -> Approval:
+    _get(db, Run, run_id, "Run")
     return await _manager(request).resume(
         run_id,
         approval_id,

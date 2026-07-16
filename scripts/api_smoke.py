@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import http.cookiejar
 import json
 import time
 import urllib.error
@@ -15,6 +16,8 @@ from typing import Any
 class ApiClient:
     def __init__(self, base_url: str) -> None:
         self.base_url = base_url.rstrip("/")
+        self.csrf_token = ""
+        self.opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(http.cookiejar.CookieJar()))
 
     def request(
         self,
@@ -28,9 +31,11 @@ class ApiClient:
         headers = {"Accept": "application/json"}
         if data is not None:
             headers["Content-Type"] = "application/json"
+        if method not in {"GET", "HEAD", "OPTIONS"} and self.csrf_token:
+            headers["X-CSRF-Token"] = self.csrf_token
         request = urllib.request.Request(self.base_url + path, data=data, headers=headers, method=method)
         try:
-            with urllib.request.urlopen(request, timeout=15) as response:
+            with self.opener.open(request, timeout=15) as response:
                 body = response.read()
                 if expect_json:
                     return json.loads(body.decode("utf-8")) if body else None
@@ -38,6 +43,30 @@ class ApiClient:
         except urllib.error.HTTPError as exc:
             detail = exc.read(4096).decode("utf-8", errors="replace")
             raise RuntimeError(f"{method} {path} returned HTTP {exc.code}: {detail}") from exc
+
+    def authenticate(self) -> None:
+        phone = "13800138000"
+        issued = self.request(
+            "/api/v1/auth/phone/code", method="POST", payload={"phone": phone, "purpose": "register"}
+        )
+        try:
+            result = self.request(
+                "/api/v1/auth/phone/register",
+                method="POST",
+                payload={"phone": phone, "code": issued["debug_code"], "username": "安装验收管理员"},
+            )
+        except RuntimeError as exc:
+            if "PHONE_ALREADY_REGISTERED" not in str(exc):
+                raise
+            issued = self.request(
+                "/api/v1/auth/phone/code", method="POST", payload={"phone": phone, "purpose": "login"}
+            )
+            result = self.request(
+                "/api/v1/auth/phone/login",
+                method="POST",
+                payload={"phone": phone, "code": issued["debug_code"]},
+            )
+        self.csrf_token = result["csrf_token"]
 
     def wait_for(self, run_id: str, statuses: set[str], timeout: float = 12) -> dict[str, Any]:
         deadline = time.monotonic() + timeout
@@ -176,6 +205,7 @@ def main() -> int:
     parser.add_argument("--expect-approval", action="store_true")
     args = parser.parse_args()
     client = ApiClient(args.base_url)
+    client.authenticate()
     check_contract(client)
     run_mock_flow(client, args.expect_approval)
     print("Hi-agent API smoke OK: static UI, REST, mock Run, SSE replay, persistence")
