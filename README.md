@@ -6,7 +6,7 @@ REST/SSE、LangGraph、带引用的本地 RAG、MCP 客户端与示例服务器�
 
 本项目为原创 clean-room 实现，采用 Apache-2.0。Datawhale Hello-Agents 仅作为
 能力设计的教育参考；没有复制其代码、文档或资产，详见 [NOTICE.md](NOTICE.md)。
-
+<img width="2808" height="1276" alt="3cc368d1-efe5-4d73-9f3d-eb31557d176f" src="https://github.com/user-attachments/assets/69b2b43d-e6ae-4d50-8777-e08dfe186a2d" />
 ## 主要能力
 
 - 固定 LangGraph 流程：加载会话 → 可选检索 → 模型决策 → 工具/审批循环 →
@@ -29,6 +29,9 @@ REST/SSE、LangGraph、带引用的本地 RAG、MCP 客户端与示例服务器�
   数字人工作台位于“设置”中。
 - 手机验证码与微信扫码登录界面、本地安全会话、初始化管理员迁移和逐用户资源隔离。
 - Linux/NVIDIA vLLM Compose 固定 `vllm/vllm-openai:v0.23.0`；macOS 和 Windows 仅作为 `/v1` 客户端。
+
+<img width="2838" height="1316" alt="442756b2-c117-4533-8922-0c761bb8a100" src="https://github.com/user-attachments/assets/978a7d3f-ff78-4045-8093-33be36fcde7c" />
+
 
 ## 目录
 
