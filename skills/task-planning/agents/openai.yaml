@@ -1,0 +1,4 @@
+interface:
+  display_name: "任务规划"
+  short_description: "生成决策完整、可直接实施的计划"
+  default_prompt: "使用 $task-planning 创建包含测试与验收标准的可实施计划。"

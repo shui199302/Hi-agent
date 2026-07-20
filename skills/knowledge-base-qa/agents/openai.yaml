@@ -1,0 +1,4 @@
+interface:
+  display_name: "知识库问答"
+  short_description: "依据索引文档和引用回答问题"
+  default_prompt: "使用 $knowledge-base-qa，根据我的知识库文档和可核验引用回答这个问题。"

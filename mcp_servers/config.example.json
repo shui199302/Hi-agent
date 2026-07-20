@@ -1,0 +1,99 @@
+{
+  "mcpServers": {
+    "hi-agent-workspace-stdio": {
+      "transport": "stdio",
+      "command": "uv",
+      "args": [
+        "run",
+        "--project",
+        "/absolute/path/to/Hi-agent/mcp_servers",
+        "hi-agent-mcp",
+        "--transport",
+        "stdio",
+        "--workspace",
+        "/absolute/path/to/workspace"
+      ]
+    },
+    "hi-agent-workspace-http": {
+      "transport": "streamable_http",
+      "url": "http://127.0.0.1:8765/mcp"
+    },
+    "filesystem": {
+      "transport": "stdio",
+      "command": "npx",
+      "args": [
+        "-y",
+        "@modelcontextprotocol/server-filesystem@2026.7.4",
+        "/absolute/path/to/allowed/workspace"
+      ]
+    },
+    "git": {
+      "transport": "stdio",
+      "command": "uvx",
+      "args": [
+        "--from",
+        "mcp-server-git==2026.7.10",
+        "mcp-server-git",
+        "--repository",
+        "/absolute/path/to/git/repository"
+      ]
+    },
+    "fetch": {
+      "transport": "stdio",
+      "command": "uvx",
+      "args": [
+        "--from",
+        "mcp-server-fetch==2026.7.10",
+        "mcp-server-fetch"
+      ]
+    },
+    "time": {
+      "transport": "stdio",
+      "command": "uvx",
+      "args": [
+        "--from",
+        "mcp-server-time==2026.7.10",
+        "mcp-server-time"
+      ]
+    },
+    "memory": {
+      "transport": "stdio",
+      "command": "/usr/bin/env",
+      "args": [
+        "MEMORY_FILE_PATH=/absolute/path/to/data/mcp-memory.jsonl",
+        "npx",
+        "-y",
+        "@modelcontextprotocol/server-memory@2026.1.26"
+      ]
+    },
+    "sequential-thinking": {
+      "transport": "stdio",
+      "command": "/usr/bin/env",
+      "args": [
+        "DISABLE_THOUGHT_LOGGING=true",
+        "npx",
+        "-y",
+        "@modelcontextprotocol/server-sequential-thinking@2026.7.4"
+      ]
+    },
+    "github-readonly": {
+      "transport": "stdio",
+      "command": "docker",
+      "args": [
+        "run",
+        "-i",
+        "--rm",
+        "-e",
+        "GITHUB_PERSONAL_ACCESS_TOKEN",
+        "-e",
+        "GITHUB_READ_ONLY=1",
+        "-e",
+        "GITHUB_TOOLSETS=context,repos,issues,pull_requests",
+        "ghcr.io/github/github-mcp-server:v1.0.5"
+      ],
+      "env_refs": {
+        "GITHUB_PERSONAL_ACCESS_TOKEN": "GITHUB_TOKEN"
+      }
+    }
+  }
+}

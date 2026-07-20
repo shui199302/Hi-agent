@@ -1,0 +1,4 @@
+interface:
+  display_name: "报告撰写"
+  short_description: "根据已有证据生成简洁、可支持决策的报告"
+  default_prompt: "使用 $report-writing 将这些证据整理为清晰、可支持决策的报告。"

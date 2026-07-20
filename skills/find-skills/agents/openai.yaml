@@ -1,0 +1,4 @@
+interface:
+  display_name: "发现 Skills"
+  short_description: "安全搜索、评估与安装本地或远程 Agent Skills"
+  default_prompt: "查找适合当前任务的 Skills，并在安装前检查来源、许可证和安全风险。"

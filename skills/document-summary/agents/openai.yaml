@@ -1,0 +1,4 @@
+interface:
+  display_name: "文档摘要"
+  short_description: "生成忠实且保留来源证据的摘要"
+  default_prompt: "使用 $document-summary 为此文档生成简洁、基于证据的摘要。"
