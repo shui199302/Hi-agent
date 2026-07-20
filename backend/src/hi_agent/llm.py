@@ -133,7 +133,28 @@ class MockChatModel(ChatModel):
         messages: list[dict[str, Any]],
         tools: list[dict[str, Any]],
     ) -> AsyncIterator[LlmEvent]:
+        system_text = "\n".join(str(item.get("content", "")) for item in messages if item.get("role") == "system")
         last_user = next((item["content"] for item in reversed(messages) if item.get("role") == "user"), "")
+        if "HI_AGENT_PLAN_DRAFT_V1" in system_text:
+            content = json.dumps(
+                {
+                    "summary": f"实施请求：{str(last_user)[:200]}",
+                    "steps": ["确认影响范围", "按最小改动实现", "运行相关测试"],
+                    "files": [],
+                    "risks": [],
+                    "tests": ["运行定向测试"],
+                },
+                ensure_ascii=False,
+            )
+            yield LlmEvent(kind="final", final=LlmFinal(content=content))
+            return
+        if "HI_AGENT_PLAN_REVIEW_V1" in system_text:
+            content = json.dumps(
+                {"decision": "pass", "summary": "方案范围明确且包含验证步骤", "issues": []},
+                ensure_ascii=False,
+            )
+            yield LlmEvent(kind="final", final=LlmFinal(content=content))
+            return
         marker = self._tool_marker.search(str(last_user))
         tool_messages = [item for item in messages if item.get("role") == "tool"]
         if marker and not tool_messages:
@@ -151,11 +172,7 @@ class MockChatModel(ChatModel):
                 ),
             )
             return
-        answer = (
-            f"工具执行结果：{tool_messages[-1]['content']}"
-            if tool_messages
-            else f"Mock 模型回答：{last_user}"
-        )
+        answer = f"工具执行结果：{tool_messages[-1]['content']}" if tool_messages else f"Mock 模型回答：{last_user}"
         for offset in range(0, len(answer), 8):
             delta = answer[offset : offset + 8]
             await asyncio.sleep(0)
@@ -204,12 +221,15 @@ class OpenAICompatibleChatModel(ChatModel):
         for attempt in range(3):
             try:
                 timeout = httpx.Timeout(self.timeout_seconds, connect=min(10.0, self.timeout_seconds))
-                async with httpx.AsyncClient(timeout=timeout, trust_env=False) as client, client.stream(
-                    "POST",
-                    f"{self.base_url}/chat/completions",
-                    headers=headers,
-                    json=payload,
-                ) as response:
+                async with (
+                    httpx.AsyncClient(timeout=timeout, trust_env=False) as client,
+                    client.stream(
+                        "POST",
+                        f"{self.base_url}/chat/completions",
+                        headers=headers,
+                        json=payload,
+                    ) as response,
+                ):
                     response_status = int(getattr(response, "status_code", 200))
                     if response_status >= 400:
                         detail = await _upstream_error_detail(response, api_key)

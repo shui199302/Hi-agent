@@ -7,6 +7,7 @@ import LoadingState from '../components/LoadingState.vue'
 import ModalDialog from '../components/ModalDialog.vue'
 import StatusBadge from '../components/StatusBadge.vue'
 import { notify } from '../notifications'
+import { navigateTo } from '../navigation'
 import type { RemoteSkill, SkillMetadata } from '../types'
 
 interface SkillDetail extends SkillMetadata {
@@ -28,9 +29,13 @@ const detailOpen = ref(false)
 const detailLoading = ref(false)
 const remoteOpen = ref(false)
 const remoteQuery = ref('')
+const remoteSource = ref<'all' | 'github' | 'clawhub'>('all')
 const remoteLoading = ref(false)
 const remoteResults = ref<RemoteSkill[]>([])
 const installing = ref('')
+const reviewOpen = ref(false)
+const reviewLoading = ref(false)
+const reviewSkill = ref<RemoteSkill | null>(null)
 const creatorOpen = ref(false)
 const creating = ref(false)
 const createForm = reactive({ name: '', display_name: '', description: '', short_description: '', default_prompt: '', instructions: '# 工作流\n\n1. 明确任务目标。\n2. 执行并校验结果。' })
@@ -59,17 +64,30 @@ function displayName(skill: SkillMetadata): string {
 async function searchRemote(): Promise<void> {
   if (remoteQuery.value.trim().length < 2) return
   remoteLoading.value = true
+  remoteResults.value = []
   try {
-    remoteResults.value = await request<RemoteSkill[]>(`/skills-remote/search?q=${encodeURIComponent(remoteQuery.value.trim())}`)
+    remoteResults.value = await request<RemoteSkill[]>(`/skills-remote/search?q=${encodeURIComponent(remoteQuery.value.trim())}&source=${remoteSource.value}`)
   } catch (error) { notify(formatApiError(error), 'error') }
   finally { remoteLoading.value = false }
 }
 
-async function installRemote(skill: RemoteSkill): Promise<void> {
-  if (!window.confirm(`确认从 ${skill.repository}@${skill.ref} 安装“${skill.name}”？远程内容将先经过路径与危险内容扫描，脚本不会执行。`)) return
+async function openRemoteReview(skill: RemoteSkill): Promise<void> {
+  reviewSkill.value = skill
+  reviewOpen.value = true
+  if (skill.source !== 'clawhub' || !skill.slug) return
+  reviewLoading.value = true
+  try { reviewSkill.value = await request<RemoteSkill>(`/skills-remote/clawhub/${encodeURIComponent(skill.slug)}`) }
+  catch (error) { notify(formatApiError(error), 'error'); reviewOpen.value = false }
+  finally { reviewLoading.value = false }
+}
+
+async function installRemote(): Promise<void> {
+  const skill = reviewSkill.value
+  if (!skill) return
   installing.value = skill.name
   try {
-    await request('/skills-remote/install', { method: 'POST', ...jsonBody({ catalog: skill.catalog, path: skill.path, confirm: true, replace: false }) })
+    await request('/skills-remote/install', { method: 'POST', ...jsonBody({ source: skill.source, catalog: skill.catalog, path: skill.path, slug: skill.slug, version: skill.version, confirm: true, replace: false }) })
+    reviewOpen.value = false
     notify(`${skill.name} 已安装，尚未绑定任何智能体`, 'success')
     await load()
   } catch (error) { notify(formatApiError(error), 'error') }
@@ -123,7 +141,7 @@ async function openDetail(skill: SkillMetadata): Promise<void> {
 
 function goAgents(): void {
   detailOpen.value = false
-  window.location.hash = '/agents'
+  navigateTo('agents')
 }
 
 onMounted(load)
@@ -195,16 +213,28 @@ onActivated(() => { if (!loading.value) void load() })
       </template>
     </ModalDialog>
 
-    <ModalDialog :open="remoteOpen" title="远程发现 Skills" description="仅搜索已批准的 GitHub 目录；安装前进行安全扫描并要求确认" wide @close="remoteOpen = false">
-      <form class="remote-search" @submit.prevent="searchRemote"><input v-model="remoteQuery" class="input" placeholder="例如：browser automation、PDF、数据分析" /><button class="button" :disabled="remoteLoading" type="submit">{{ remoteLoading ? '搜索中…' : '搜索' }}</button></form>
+    <ModalDialog :open="remoteOpen" title="远程发现 Skills" description="支持 ClawHub 与批准的 GitHub 目录；安装版本固定并经过平台安全验证和本地扫描" wide @close="remoteOpen = false">
+      <form class="remote-search" @submit.prevent="searchRemote"><select v-model="remoteSource" class="select"><option value="all">全部来源</option><option value="clawhub">ClawHub</option><option value="github">GitHub 白名单</option></select><input v-model="remoteQuery" class="input" placeholder="例如：browser automation、PDF、数据分析" /><button class="button" :disabled="remoteLoading" type="submit">{{ remoteLoading ? '搜索中…' : '搜索' }}</button></form>
       <div v-if="remoteResults.length" class="remote-results">
-        <article v-for="skill in remoteResults" :key="`${skill.repository}-${skill.path}`">
-          <div><strong>{{ skill.name }}</strong><small>{{ skill.repository }}@{{ skill.ref }} · {{ skill.path }}</small><p>{{ skill.description }}</p></div>
-          <button class="button secondary small" :disabled="installing === skill.name" type="button" @click="installRemote(skill)">{{ installing === skill.name ? '扫描安装中…' : '审查并安装' }}</button>
+        <article v-for="skill in remoteResults" :key="`${skill.source}-${skill.slug || skill.repository}-${skill.path}`">
+          <div><strong>{{ skill.name }}</strong><small v-if="skill.source === 'clawhub'">ClawHub · {{ skill.publisher || '未知发布者' }} · {{ skill.version || '安装时锁定版本' }}<template v-if="skill.downloads"> · {{ skill.downloads }} 下载</template></small><small v-else>{{ skill.repository }}@{{ skill.ref }} · {{ skill.path }}</small><p>{{ skill.description }}</p></div>
+          <button class="button secondary small" :disabled="installing === skill.name" type="button" @click="openRemoteReview(skill)">查看证据</button>
         </article>
       </div>
       <EmptyState v-else-if="!remoteLoading" icon="search" title="输入能力关键词" description="远程 Skill 在安装后仍需手动绑定到智能体。" />
       <template #footer><button class="button secondary" type="button" @click="remoteOpen = false">关闭</button></template>
+    </ModalDialog>
+
+    <ModalDialog :open="reviewOpen" title="审查远程 Skill" description="安装前核对发布者、锁定版本、来源和安全边界" wide @close="reviewOpen = false">
+      <LoadingState v-if="reviewLoading" :rows="3" />
+      <div v-else-if="reviewSkill" class="skill-detail">
+        <div class="detail-facts"><div><span>来源</span><strong>{{ reviewSkill.source === 'clawhub' ? 'ClawHub' : 'GitHub 白名单' }}</strong></div><div><span>发布者</span><strong>{{ reviewSkill.publisher || reviewSkill.repository || '未知' }}</strong></div><div><span>锁定版本</span><strong>{{ reviewSkill.version || reviewSkill.ref || '安装时锁定 commit' }}</strong></div></div>
+        <section><h3>{{ reviewSkill.name }}</h3><p>{{ reviewSkill.description }}</p></section>
+        <section v-if="reviewSkill.instructions_preview"><h3>发布者说明预览</h3><pre>{{ reviewSkill.instructions_preview }}</pre></section>
+        <section><h3>来源与许可</h3><p><a :href="reviewSkill.source_url" target="_blank" rel="noopener noreferrer">打开来源页面</a> · {{ reviewSkill.license || '未声明许可，安装后仍需自行核验使用权' }}</p></section>
+        <div class="safety-note"><AppIcon name="alert" :size="16" /><span>ClawHub 自动扫描信号不等同于人工安全担保。Hi-agent 安装时还会执行版本锁定、路径约束、体积限制和本地策略扫描；远程脚本不会进入内置脚本白名单。</span></div>
+      </div>
+      <template #footer><button class="button secondary" type="button" @click="reviewOpen = false">取消</button><button class="button" type="button" :disabled="reviewLoading || !reviewSkill || installing === reviewSkill?.name" @click="installRemote">{{ installing ? '验证并安装中…' : '确认风险并安装' }}</button></template>
     </ModalDialog>
 
     <ModalDialog :open="creatorOpen" title="创建 Skill" description="写入严格限制在项目 skills/ 目录；脚本不会自动生成或启用" wide @close="creatorOpen = false">
@@ -252,8 +282,10 @@ onActivated(() => { if (!loading.value) void load() })
 .detail-error { padding: 11px; color: var(--red); background: var(--red-soft); border-radius: 9px; }
 .safety-note { display: flex; align-items: flex-start; gap: 8px; padding: 11px; color: #4f6f60; font-size: 9px; line-height: 1.55; background: var(--green-soft); border-radius: 9px; }
 .safety-note svg { flex: 0 0 auto; }
-.remote-search { display: flex; gap: 9px; }
-.remote-search input { flex: 1; }
+.remote-search { display: flex; width: 100%; align-items: stretch; gap: 12px; }
+.remote-search select { width: 210px; flex: 0 0 210px; }
+.remote-search input { min-width: 280px; flex: 1 1 auto; }
+.remote-search .button { min-width: 92px; flex: 0 0 auto; white-space: nowrap; }
 .remote-results { display: grid; max-height: 430px; gap: 9px; margin-top: 14px; overflow: auto; }
 .remote-results article { display: flex; align-items: center; justify-content: space-between; gap: 15px; padding: 13px; border: 1px solid var(--line); border-radius: 10px; }
 .remote-results article > div { min-width: 0; }
@@ -261,5 +293,6 @@ onActivated(() => { if (!loading.value) void load() })
 .remote-results small { margin-top: 3px; color: var(--muted); font: 8px 'DM Mono',monospace; }
 .remote-results p { margin: 7px 0 0; color: var(--muted); font-size: 9px; line-height: 1.5; }
 .creator-instructions { min-height: 180px; font-family: 'DM Mono',monospace; }
+@media (max-width: 700px) { .remote-search { flex-wrap: wrap; } .remote-search select { width: 100%; flex-basis: 100%; } .remote-search input { min-width: 0; } }
 @media (max-width: 600px) { .skill-toolbar { align-items: stretch; flex-direction: column; } .skill-count { justify-content: flex-end; } .detail-facts { grid-template-columns: 1fr; } }
 </style>

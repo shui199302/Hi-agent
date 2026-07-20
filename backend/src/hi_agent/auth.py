@@ -8,14 +8,14 @@ import os
 import secrets
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, cast
 
 from fastapi import APIRouter, Cookie, Depends, Header, Request, Response, status
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from .config import Settings
-from .database import get_db
+from .database import ensure_builtin_agents, ensure_builtin_prompt_templates, ensure_default_project, get_db
 from .errors import ConflictError, HiAgentError
 from .models import AuthAuditLog, AuthSession, OtpChallenge, User, UserIdentity, WechatChallenge, now_utc
 from .schemas import (
@@ -38,7 +38,7 @@ public_auth_router = APIRouter(prefix="/api/v1/auth", tags=["认证"])
 
 
 def _settings(request: Request) -> Settings:
-    return request.app.state.settings
+    return cast(Settings, request.app.state.settings)
 
 
 def _secret_file(settings: Settings) -> Path:
@@ -241,6 +241,9 @@ def register_phone(
         user.username = payload.username.strip()
         user.phone = phone
         user.status = "active"
+    ensure_default_project(db, user.id)
+    ensure_builtin_prompt_templates(db, user.id)
+    ensure_builtin_agents(db, user.id)
     db.add(UserIdentity(user_id=user.id, provider="phone", subject=phone, profile={"phone_tail": phone[-4:]}))
     _audit(db, "phone.register", "success", user.id, phone_tail=phone[-4:])
     return _set_session(response, db, settings, user)
@@ -349,6 +352,9 @@ def complete_wechat(
             user.status = "active"
         user.wechat_nickname = nickname
         user.avatar_url = str(challenge.profile.get("avatar_url") or "") or None
+        ensure_default_project(db, user.id)
+        ensure_builtin_prompt_templates(db, user.id)
+        ensure_builtin_agents(db, user.id)
         db.add(UserIdentity(user_id=user.id, provider="wechat", subject=subject, profile=challenge.profile))
     challenge.consumed_at = now_utc()
     challenge.status = "consumed"

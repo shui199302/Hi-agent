@@ -7,17 +7,25 @@ import json
 import time
 from collections import Counter
 from collections.abc import AsyncIterator
+from datetime import datetime
 from typing import Any, cast
+from urllib.parse import urlparse
 
 from fastapi import APIRouter, Depends, File, Header, Query, Request, Response, UploadFile, status
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from . import __version__
+from .agent_config import revision_snapshot
+from .api_support import apply_model as _apply
+from .api_support import commit_model as _commit
+from .api_support import get_owned as _get
+from .api_support import request_owner_id as _owner_id
+from .artifact_api import router as artifact_router
 from .auth import CurrentUser, current_user, require_admin, require_csrf
-from .database import get_db
+from .database import ensure_builtin_agents, get_db
+from .digital_human import build_digital_human_spec
 from .errors import ConflictError, HiAgentError, NotFoundError
 from .mcp_client import McpClient
 from .models import (
@@ -27,10 +35,13 @@ from .models import (
     Approval,
     ChatSession,
     Document,
+    ImageEndpoint,
     KnowledgeBase,
     McpServerConfig,
     Message,
     ModelEndpoint,
+    Project,
+    PromptTemplate,
     Run,
     RunEvent,
     RunStatus,
@@ -38,6 +49,7 @@ from .models import (
     now_utc,
 )
 from .rag import RagService
+from .reports import RagReportData, render_report
 from .runtime import RunManager, snapshot_agent
 from .schemas import (
     AgentCreate,
@@ -47,8 +59,14 @@ from .schemas import (
     ApprovalDecision,
     ApprovalRead,
     CancelResponse,
+    DigitalHumanGenerate,
+    DigitalHumanGenerateResponse,
+    DigitalHumanSpec,
     DocumentQueryResponse,
     DocumentRead,
+    ImageEndpointCreate,
+    ImageEndpointRead,
+    ImageEndpointUpdate,
     KnowledgeBaseCreate,
     KnowledgeBaseQueryResponse,
     KnowledgeBaseRead,
@@ -61,6 +79,14 @@ from .schemas import (
     ModelEndpointCreate,
     ModelEndpointRead,
     ModelEndpointUpdate,
+    ProjectAgentAssign,
+    ProjectCreate,
+    ProjectRead,
+    ProjectUpdate,
+    PromptTemplateCreate,
+    PromptTemplateRead,
+    PromptTemplateUpdate,
+    RagReportCreate,
     RemoteSkillInstall,
     RemoteSkillRead,
     RunAccepted,
@@ -81,26 +107,7 @@ from .schemas import (
 from .skills import SkillRegistry
 
 router = APIRouter(prefix="/api/v1", dependencies=[Depends(current_user), Depends(require_csrf)])
-
-
-def _get[ModelT](db: Session, model: type[ModelT], item_id: str, label: str) -> ModelT:
-    item = db.get(model, item_id)
-    if item is None:
-        raise NotFoundError(label, item_id)
-    return item
-
-
-def _commit[ModelT](db: Session, item: ModelT) -> ModelT:
-    db.add(item)
-    db.commit()
-    db.refresh(item)
-    return item
-
-
-def _apply[ModelT](item: ModelT, payload: BaseModel) -> ModelT:
-    for key, value in payload.model_dump(exclude_unset=True, mode="json").items():
-        setattr(item, key, value)
-    return item
+router.include_router(artifact_router)
 
 
 def _manager(request: Request) -> RunManager:
@@ -117,10 +124,6 @@ def _mcp(request: Request) -> McpClient:
 
 def _skills(request: Request) -> SkillRegistry:
     return cast(SkillRegistry, request.app.state.skill_registry)
-
-
-def _owner_id(request: Request) -> str:
-    return str(request.state.user.id)
 
 
 def _validate_user_secret_reference(user: User, env_name: str) -> None:
@@ -147,9 +150,9 @@ def _knowledge_base_read(db: Session, kb: KnowledgeBase) -> KnowledgeBaseRead:
             func.coalesce(func.sum(Document.size_bytes), 0),
         ).where(Document.knowledge_base_id == kb.id)
     ).one()
-    bound_agent_count = db.scalar(
-        select(func.count()).select_from(AgentConfig).where(AgentConfig.knowledge_base_id == kb.id)
-    ) or 0
+    bound_agent_count = (
+        db.scalar(select(func.count()).select_from(AgentConfig).where(AgentConfig.knowledge_base_id == kb.id)) or 0
+    )
     kb_status = "empty"
     if failed_count:
         kb_status = "error"
@@ -171,24 +174,32 @@ def _knowledge_base_read(db: Session, kb: KnowledgeBase) -> KnowledgeBaseRead:
     )
 
 
-def _agent_snapshot(agent: AgentConfig) -> dict[str, Any]:
-    return {
-        "name": agent.name,
-        "description": agent.description,
-        "system_prompt": agent.system_prompt,
-        "model_endpoint_id": agent.model_endpoint_id,
-        "knowledge_base_id": agent.knowledge_base_id,
-        "skills": list(agent.skills),
-        "mcp_servers": list(agent.mcp_servers),
-        "tool_policy": dict(agent.tool_policy),
-        "max_tool_loops": agent.max_tool_loops,
-        "enabled": agent.enabled,
-    }
+def _project_read(db: Session, project: Project) -> ProjectRead:
+    agent_count = (
+        db.scalar(select(func.count()).select_from(AgentConfig).where(AgentConfig.project_id == project.id)) or 0
+    )
+    kb_count = (
+        db.scalar(select(func.count()).select_from(KnowledgeBase).where(KnowledgeBase.project_id == project.id)) or 0
+    )
+    session_count = (
+        db.scalar(select(func.count()).select_from(ChatSession).where(ChatSession.project_id == project.id)) or 0
+    )
+    run_count = db.scalar(select(func.count()).select_from(Run).where(Run.project_id == project.id)) or 0
+    last_activity = db.scalar(select(func.max(ChatSession.updated_at)).where(ChatSession.project_id == project.id))
+    return ProjectRead.model_validate(project).model_copy(
+        update={
+            "agent_count": int(agent_count),
+            "knowledge_base_count": int(kb_count),
+            "session_count": int(session_count),
+            "run_count": int(run_count),
+            "last_activity_at": last_activity,
+        }
+    )
 
 
 def _save_agent_revision(db: Session, agent: AgentConfig, reason: str) -> None:
     latest = db.scalar(select(func.max(AgentRevision.version)).where(AgentRevision.agent_id == agent.id)) or 0
-    db.add(AgentRevision(agent_id=agent.id, version=int(latest) + 1, snapshot=_agent_snapshot(agent), reason=reason))
+    db.add(AgentRevision(agent_id=agent.id, version=int(latest) + 1, snapshot=revision_snapshot(agent), reason=reason))
     db.commit()
 
 
@@ -243,9 +254,179 @@ def delete_model(model_id: str, db: Session = Depends(get_db)) -> Response:
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
+@router.get("/image-endpoints", response_model=list[ImageEndpointRead])
+def list_image_endpoints(db: Session = Depends(get_db)) -> list[ImageEndpoint]:
+    return list(db.scalars(select(ImageEndpoint).order_by(ImageEndpoint.created_at)).all())
+
+
+@router.post("/image-endpoints", response_model=ImageEndpointRead, status_code=status.HTTP_201_CREATED)
+def create_image_endpoint(
+    payload: ImageEndpointCreate, user: CurrentUser, db: Session = Depends(get_db)
+) -> ImageEndpoint:
+    _validate_user_secret_reference(user, payload.api_key_env)
+    return _commit(db, ImageEndpoint(**payload.model_dump(mode="json")))
+
+
+@router.patch("/image-endpoints/{endpoint_id}", response_model=ImageEndpointRead)
+def update_image_endpoint(
+    endpoint_id: str, payload: ImageEndpointUpdate, user: CurrentUser, db: Session = Depends(get_db)
+) -> ImageEndpoint:
+    if payload.api_key_env:
+        _validate_user_secret_reference(user, payload.api_key_env)
+    return _commit(db, _apply(_get(db, ImageEndpoint, endpoint_id, "ImageEndpoint"), payload))
+
+
+@router.delete("/image-endpoints/{endpoint_id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_image_endpoint(endpoint_id: str, db: Session = Depends(get_db)) -> Response:
+    db.delete(_get(db, ImageEndpoint, endpoint_id, "ImageEndpoint"))
+    db.commit()
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@router.get("/projects", response_model=list[ProjectRead])
+def list_projects(
+    status_filter: str = Query(default="all", alias="status", pattern=r"^(all|active|archived)$"),
+    db: Session = Depends(get_db),
+) -> list[ProjectRead]:
+    statement = select(Project).order_by(Project.status, Project.updated_at.desc())
+    if status_filter != "all":
+        statement = statement.where(Project.status == status_filter)
+    return [_project_read(db, item) for item in db.scalars(statement).all()]
+
+
+@router.post("/projects", response_model=ProjectRead, status_code=status.HTTP_201_CREATED)
+def create_project(payload: ProjectCreate, db: Session = Depends(get_db)) -> ProjectRead:
+    return _project_read(db, _commit(db, Project(**payload.model_dump())))
+
+
+@router.get("/projects/{project_id}", response_model=ProjectRead)
+def get_project(project_id: str, db: Session = Depends(get_db)) -> ProjectRead:
+    return _project_read(db, _get(db, Project, project_id, "Project"))
+
+
+@router.patch("/projects/{project_id}", response_model=ProjectRead)
+def update_project(project_id: str, payload: ProjectUpdate, db: Session = Depends(get_db)) -> ProjectRead:
+    project = _commit(db, _apply(_get(db, Project, project_id, "Project"), payload))
+    return _project_read(db, project)
+
+
+@router.post("/projects/{project_id}/agents:assign", response_model=list[AgentRead])
+def assign_project_agents(
+    project_id: str, payload: ProjectAgentAssign, db: Session = Depends(get_db)
+) -> list[AgentConfig]:
+    project = _get(db, Project, project_id, "Project")
+    if project.status != "active":
+        raise ConflictError("PROJECT_ARCHIVED", "归档项目不能接收智能体")
+    agents = [_get(db, AgentConfig, agent_id, "Agent") for agent_id in payload.agent_ids]
+    conflicts: list[dict[str, str]] = []
+    for agent in agents:
+        if not agent.knowledge_base_id:
+            continue
+        kb = _get(db, KnowledgeBase, agent.knowledge_base_id, "KnowledgeBase")
+        if kb.project_id != project_id:
+            conflicts.append({"agent_id": agent.id, "agent_name": agent.name, "knowledge_base": kb.name})
+    if conflicts:
+        raise ConflictError(
+            "AGENT_KB_PROJECT_MISMATCH",
+            "部分智能体绑定了其他项目的知识库，请先解绑或迁移知识库",
+            conflicts=conflicts,
+        )
+    changed: list[AgentConfig] = []
+    for agent in agents:
+        if agent.project_id == project_id:
+            continue
+        agent.project_id = project_id
+        latest = db.scalar(select(func.max(AgentRevision.version)).where(AgentRevision.agent_id == agent.id)) or 0
+        db.add(
+            AgentRevision(
+                agent_id=agent.id,
+                version=int(latest) + 1,
+                snapshot=revision_snapshot(agent),
+                reason=f"批量加入项目：{project.name}",
+            )
+        )
+        changed.append(agent)
+    db.commit()
+    return changed
+
+
+@router.get("/prompt-templates", response_model=list[PromptTemplateRead])
+def list_prompt_templates(
+    q: str = Query(default="", max_length=200),
+    category: str = Query(default="all", pattern=r"^(all|general|rag|research|analysis|writing|coding|custom)$"),
+    enabled: bool | None = Query(default=None),
+    db: Session = Depends(get_db),
+) -> list[PromptTemplate]:
+    statement = select(PromptTemplate).order_by(PromptTemplate.builtin.desc(), PromptTemplate.updated_at.desc())
+    if q.strip():
+        pattern = f"%{q.strip().lower()}%"
+        statement = statement.where(
+            func.lower(PromptTemplate.name).like(pattern)
+            | func.lower(PromptTemplate.description).like(pattern)
+            | func.lower(PromptTemplate.content).like(pattern)
+        )
+    if category != "all":
+        statement = statement.where(PromptTemplate.category == category)
+    if enabled is not None:
+        statement = statement.where(PromptTemplate.enabled == enabled)
+    return list(db.scalars(statement).all())
+
+
+@router.post("/prompt-templates", response_model=PromptTemplateRead, status_code=status.HTTP_201_CREATED)
+def create_prompt_template(payload: PromptTemplateCreate, db: Session = Depends(get_db)) -> PromptTemplate:
+    return _commit(db, PromptTemplate(**payload.model_dump()))
+
+
+@router.get("/prompt-templates/{template_id}", response_model=PromptTemplateRead)
+def get_prompt_template(template_id: str, db: Session = Depends(get_db)) -> PromptTemplate:
+    return _get(db, PromptTemplate, template_id, "PromptTemplate")
+
+
+@router.patch("/prompt-templates/{template_id}", response_model=PromptTemplateRead)
+def update_prompt_template(
+    template_id: str, payload: PromptTemplateUpdate, db: Session = Depends(get_db)
+) -> PromptTemplate:
+    template = _get(db, PromptTemplate, template_id, "PromptTemplate")
+    if template.builtin:
+        raise ConflictError("PROMPT_TEMPLATE_BUILTIN", "内置提示词模板不可修改，请复制后编辑")
+    return _commit(db, _apply(template, payload))
+
+
+@router.delete("/prompt-templates/{template_id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_prompt_template(template_id: str, db: Session = Depends(get_db)) -> Response:
+    template = _get(db, PromptTemplate, template_id, "PromptTemplate")
+    if template.builtin:
+        raise ConflictError("PROMPT_TEMPLATE_BUILTIN", "内置提示词模板不可删除")
+    db.delete(template)
+    db.commit()
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@router.delete("/projects/{project_id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_project(project_id: str, db: Session = Depends(get_db)) -> Response:
+    project = _get(db, Project, project_id, "Project")
+    agents = db.scalar(select(func.count()).select_from(AgentConfig).where(AgentConfig.project_id == project_id)) or 0
+    knowledge_bases = (
+        db.scalar(select(func.count()).select_from(KnowledgeBase).where(KnowledgeBase.project_id == project_id)) or 0
+    )
+    if agents or knowledge_bases:
+        raise ConflictError(
+            "PROJECT_IN_USE", "项目仍包含智能体或知识库，请先迁移资源", agents=agents, knowledge_bases=knowledge_bases
+        )
+    db.delete(project)
+    db.commit()
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
 @router.get("/knowledge-bases", response_model=list[KnowledgeBaseRead])
-def list_knowledge_bases(db: Session = Depends(get_db)) -> list[KnowledgeBaseRead]:
-    items = db.scalars(select(KnowledgeBase).order_by(KnowledgeBase.created_at)).all()
+def list_knowledge_bases(
+    project_id: str | None = Query(default=None), db: Session = Depends(get_db)
+) -> list[KnowledgeBaseRead]:
+    statement = select(KnowledgeBase).order_by(KnowledgeBase.created_at)
+    if project_id:
+        _get(db, Project, project_id, "Project")
+        statement = statement.where(KnowledgeBase.project_id == project_id)
+    items = db.scalars(statement).all()
     return [_knowledge_base_read(db, item) for item in items]
 
 
@@ -287,6 +468,10 @@ def create_knowledge_base(
     request: Request, payload: KnowledgeBaseCreate, db: Session = Depends(get_db)
 ) -> KnowledgeBaseRead:
     values = payload.model_dump()
+    if payload.project_id:
+        project = _get(db, Project, payload.project_id, "Project")
+        if project.status != "active":
+            raise ConflictError("PROJECT_ARCHIVED", "归档项目不能新增知识库")
     if "embedding_model" not in payload.model_fields_set:
         values["embedding_model"] = request.app.state.settings.embedding_model
     return _knowledge_base_read(db, _commit(db, KnowledgeBase(**values)))
@@ -299,6 +484,29 @@ def get_knowledge_base(kb_id: str, db: Session = Depends(get_db)) -> KnowledgeBa
 
 @router.patch("/knowledge-bases/{kb_id}", response_model=KnowledgeBaseRead)
 def update_knowledge_base(kb_id: str, payload: KnowledgeBaseUpdate, db: Session = Depends(get_db)) -> KnowledgeBaseRead:
+    if "project_id" in payload.model_fields_set and not payload.project_id:
+        raise HiAgentError("PROJECT_REQUIRED", "知识库必须归属项目")
+    if payload.project_id:
+        project = _get(db, Project, payload.project_id, "Project")
+        if project.status != "active":
+            raise ConflictError("PROJECT_ARCHIVED", "不能把知识库迁移到归档项目")
+        mismatched_agents = (
+            db.scalar(
+                select(func.count())
+                .select_from(AgentConfig)
+                .where(
+                    AgentConfig.knowledge_base_id == kb_id,
+                    AgentConfig.project_id != payload.project_id,
+                )
+            )
+            or 0
+        )
+        if mismatched_agents:
+            raise ConflictError(
+                "KNOWLEDGE_BASE_PROJECT_IN_USE",
+                "知识库仍被其他项目的智能体绑定，请先迁移或解绑智能体",
+                agents=mismatched_agents,
+            )
     kb = _commit(db, _apply(_get(db, KnowledgeBase, kb_id, "KnowledgeBase"), payload))
     return _knowledge_base_read(db, kb)
 
@@ -438,12 +646,29 @@ def _validate_agent(
     request: Request,
     db: Session,
     payload: AgentCreate | AgentUpdate,
+    current: AgentConfig | None = None,
 ) -> None:
     data = payload.model_dump(exclude_unset=True)
+    if "project_id" in payload.model_fields_set and not data.get("project_id"):
+        raise HiAgentError("PROJECT_REQUIRED", "智能体必须归属项目")
+    project_id = data.get("project_id", current.project_id if current else None)
+    if not project_id:
+        from .database import ensure_default_project
+
+        owner_id = str(db.info.get("owner_id") or "")
+        project_id = ensure_default_project(db, owner_id)
+    project = _get(db, Project, project_id, "Project")
+    if project.status != "active":
+        raise ConflictError("PROJECT_ARCHIVED", "归档项目不能新增或接收智能体")
     if endpoint_id := data.get("model_endpoint_id"):
         _get(db, ModelEndpoint, endpoint_id, "ModelEndpoint")
-    if kb_id := data.get("knowledge_base_id"):
-        _get(db, KnowledgeBase, kb_id, "KnowledgeBase")
+    if review_endpoint_id := data.get("review_model_endpoint_id"):
+        _get(db, ModelEndpoint, review_endpoint_id, "ModelEndpoint")
+    kb_id = data.get("knowledge_base_id", current.knowledge_base_id if current else None)
+    if kb_id:
+        kb = _get(db, KnowledgeBase, kb_id, "KnowledgeBase")
+        if kb.project_id != project.id:
+            raise HiAgentError("AGENT_KB_PROJECT_MISMATCH", "智能体只能绑定同一项目内的知识库")
     for server_id in data.get("mcp_servers") or []:
         _get(db, McpServerConfig, server_id, "McpServer")
     available_skills = {item.name for item in _skills(request).list() if item.valid}
@@ -457,8 +682,12 @@ def _validate_agent(
 
 
 @router.get("/agents", response_model=list[AgentRead])
-def list_agents(db: Session = Depends(get_db)) -> list[AgentConfig]:
-    return list(db.scalars(select(AgentConfig).order_by(AgentConfig.created_at)).all())
+def list_agents(project_id: str | None = Query(default=None), db: Session = Depends(get_db)) -> list[AgentConfig]:
+    statement = select(AgentConfig).order_by(AgentConfig.created_at)
+    if project_id:
+        _get(db, Project, project_id, "Project")
+        statement = statement.where(AgentConfig.project_id == project_id)
+    return list(db.scalars(statement).all())
 
 
 @router.post("/agents", response_model=AgentRead, status_code=status.HTTP_201_CREATED)
@@ -485,8 +714,11 @@ def update_agent(
     payload: AgentUpdate,
     db: Session = Depends(get_db),
 ) -> AgentConfig:
-    _validate_agent(request, db, payload)
-    agent = _commit(db, _apply(_get(db, AgentConfig, agent_id, "Agent"), payload))
+    agent = _get(db, AgentConfig, agent_id, "Agent")
+    if agent.builtin:
+        raise ConflictError("AGENT_BUILTIN_PROTECTED", "内置智能体不可修改；可复制后自定义")
+    _validate_agent(request, db, payload, agent)
+    agent = _commit(db, _apply(agent, payload))
     _save_agent_revision(db, agent, "配置更新")
     return agent
 
@@ -506,6 +738,8 @@ def restore_agent_revision(
     request: Request, agent_id: str, revision_id: str, db: Session = Depends(get_db)
 ) -> AgentConfig:
     agent = _get(db, AgentConfig, agent_id, "Agent")
+    if agent.builtin:
+        raise ConflictError("AGENT_BUILTIN_PROTECTED", "内置智能体不可恢复配置版本")
     revision = _get(db, AgentRevision, revision_id, "AgentRevision")
     if revision.agent_id != agent_id:
         raise NotFoundError("AgentRevision", revision_id)
@@ -517,35 +751,115 @@ def restore_agent_revision(
 
 
 @router.get("/observability/summary")
-def observability_summary(db: Session = Depends(get_db)) -> dict[str, Any]:
-    runs = list(db.scalars(select(Run).order_by(Run.created_at.desc()).limit(100)).all())
+def observability_summary(
+    q: str = Query(default="", max_length=200),
+    status_filter: str = Query(
+        default="all",
+        alias="status",
+        pattern=r"^(all|queued|running|waiting_approval|completed|failed|cancelled|interrupted)$",
+    ),
+    project_id: str | None = Query(default=None),
+    agent_id: str | None = Query(default=None),
+    model: str = Query(default="", max_length=250),
+    error_only: bool = Query(default=False),
+    created_from: datetime | None = Query(default=None),
+    created_to: datetime | None = Query(default=None),
+    offset: int = Query(default=0, ge=0),
+    limit: int = Query(default=20, ge=1, le=100),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    statement = select(Run).order_by(Run.created_at.desc()).limit(500)
+    if status_filter != "all":
+        statement = statement.where(Run.status == status_filter)
+    if project_id:
+        _get(db, Project, project_id, "Project")
+        statement = statement.where(Run.project_id == project_id)
+    if agent_id:
+        _get(db, AgentConfig, agent_id, "Agent")
+        statement = statement.where(Run.agent_id == agent_id)
+    if error_only:
+        statement = statement.where(Run.error_code.is_not(None))
+    if created_from:
+        statement = statement.where(Run.created_at >= created_from)
+    if created_to:
+        statement = statement.where(Run.created_at <= created_to)
+    runs = list(db.scalars(statement).all())
+    normalized_query = q.strip().lower()
+    normalized_model = model.strip().lower()
+    if normalized_query:
+        runs = [
+            run
+            for run in runs
+            if normalized_query in run.id.lower()
+            or normalized_query in run.input.lower()
+            or normalized_query in str((run.config_snapshot.get("agent") or {}).get("name", "")).lower()
+        ]
+    if normalized_model:
+        runs = [
+            run
+            for run in runs
+            if normalized_model
+            in " ".join(
+                str((run.config_snapshot.get("model_endpoint") or {}).get(key, "")) for key in ("id", "name", "model")
+            ).lower()
+        ]
     status_counts = Counter(run.status for run in runs)
     completed = [run for run in runs if run.started_at and run.finished_at]
     durations = [
         (run.finished_at - run.started_at).total_seconds() for run in completed if run.finished_at and run.started_at
     ]
     recent = []
-    for run in runs[:20]:
+    for run in runs[offset : offset + limit]:
         events = list(db.scalars(select(RunEvent).where(RunEvent.run_id == run.id)).all())
         retrieval_hits = sum(len(event.data.get("items", [])) for event in events if event.type == "retrieval")
+        snapshot_agent = run.config_snapshot.get("agent") or {}
+        snapshot_model = run.config_snapshot.get("model_endpoint") or {}
+        snapshot_kb = run.config_snapshot.get("knowledge_base") or {}
+        project = db.get(Project, run.project_id)
+        chat_session = db.get(ChatSession, run.session_id)
+        provider = urlparse(str(snapshot_model.get("base_url") or "")).hostname or ""
         recent.append(
             {
                 "id": run.id,
+                "project_id": run.project_id,
+                "project_name": project.name if project else "已删除项目",
+                "session_id": run.session_id,
+                "session_title": chat_session.title if chat_session else "已删除会话",
                 "agent_id": run.agent_id,
+                "agent_name": str(snapshot_agent.get("name") or "已删除智能体"),
+                "model_endpoint_id": snapshot_model.get("id"),
+                "model_endpoint_name": snapshot_model.get("name"),
+                "model_id": snapshot_model.get("model"),
+                "provider": provider,
+                "knowledge_base_id": snapshot_kb.get("id"),
+                "knowledge_base_name": snapshot_kb.get("name"),
                 "status": run.status,
                 "duration_seconds": (run.finished_at - run.started_at).total_seconds()
                 if run.finished_at and run.started_at
                 else None,
                 "tool_calls": sum(event.type == "tool_call" for event in events),
+                "tool_results": sum(event.type == "tool_result" for event in events),
                 "retrieval_hits": retrieval_hits,
+                "citation_count": sum(event.type == "citation" for event in events),
                 "error_code": run.error_code,
+                "error_message": run.error_message,
+                "input_preview": run.input[:160],
+                "input_chars": len(run.input),
+                "output_chars": len(run.output),
                 "created_at": run.created_at,
+                "started_at": run.started_at,
+                "finished_at": run.finished_at,
             }
         )
     return {
         "total_runs": len(runs),
+        "offset": offset,
+        "limit": limit,
         "status_counts": dict(status_counts),
         "average_duration_seconds": sum(durations) / len(durations) if durations else 0,
+        "total_tool_calls": sum(item["tool_calls"] for item in recent),
+        "total_retrieval_hits": sum(item["retrieval_hits"] for item in recent),
+        "models_used": len({item["model_id"] for item in recent if item["model_id"]}),
         "recent_runs": recent,
     }
 
@@ -553,12 +867,30 @@ def observability_summary(db: Session = Depends(get_db)) -> dict[str, Any]:
 @router.delete("/agents/{agent_id}", status_code=status.HTTP_204_NO_CONTENT)
 def delete_agent(agent_id: str, db: Session = Depends(get_db)) -> Response:
     agent = _get(db, AgentConfig, agent_id, "Agent")
+    if agent.builtin:
+        raise ConflictError("AGENT_BUILTIN_PROTECTED", "内置智能体不可删除")
     in_use = db.scalar(select(func.count()).select_from(ChatSession).where(ChatSession.agent_id == agent_id))
     if in_use:
         raise ConflictError("AGENT_IN_USE", "已有会话使用该 Agent", sessions=in_use)
     db.delete(agent)
     db.commit()
     return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@router.post("/digital-humans/generate", response_model=DigitalHumanGenerateResponse)
+def generate_digital_human(
+    payload: DigitalHumanGenerate,
+    db: Session = Depends(get_db),
+) -> DigitalHumanGenerateResponse:
+    owner_id = str(db.info.get("owner_id") or "")
+    agent = ensure_builtin_agents(db, owner_id)
+    db.commit()
+    return DigitalHumanGenerateResponse(
+        agent_id=agent.id,
+        agent_name=agent.name,
+        description=payload.description.strip(),
+        spec=DigitalHumanSpec.model_validate(build_digital_human_spec(payload.description)),
+    )
 
 
 @router.get("/mcp/servers", response_model=list[McpServerRead])
@@ -589,6 +921,8 @@ def update_mcp_server(
     if user.role != "admin" and payload.env_refs:
         raise HiAgentError("MCP_CONFIG_FORBIDDEN", "普通用户不能配置 MCP 环境变量", status_code=403)
     server = _get(db, McpServerConfig, server_id, "McpServer")
+    if server.builtin and payload.name is not None and payload.name != server.name:
+        raise ConflictError("MCP_PRESET_BUILTIN", "内置 MCP 预置不可改名")
     updated = _apply(server, payload)
     if updated.transport == "stdio" and not updated.command:
         raise HiAgentError("MCP_INVALID_CONFIG", "stdio MCP 缺少 command")
@@ -599,7 +933,10 @@ def update_mcp_server(
 
 @router.delete("/mcp/servers/{server_id}", status_code=status.HTTP_204_NO_CONTENT)
 def delete_mcp_server(server_id: str, db: Session = Depends(get_db)) -> Response:
-    db.delete(_get(db, McpServerConfig, server_id, "McpServer"))
+    server = _get(db, McpServerConfig, server_id, "McpServer")
+    if server.builtin:
+        raise ConflictError("MCP_PRESET_BUILTIN", "内置 MCP 预置不可删除，可将其停用")
+    db.delete(server)
     db.commit()
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
@@ -631,14 +968,29 @@ def get_skill(request: Request, skill_name: str) -> SkillDetail:
 
 
 @router.get("/skills-remote/search", response_model=list[RemoteSkillRead])
-def search_remote_skills(request: Request, q: str = Query(min_length=2, max_length=120)) -> list[RemoteSkillRead]:
-    return _skills(request).search_remote(q)
+def search_remote_skills(
+    request: Request,
+    q: str = Query(min_length=2, max_length=120),
+    source: str = Query(default="all", pattern=r"^(all|github|clawhub)$"),
+) -> list[RemoteSkillRead]:
+    return _skills(request).search_remote(q, source)
+
+
+@router.get("/skills-remote/clawhub/{slug}", response_model=RemoteSkillRead)
+def get_clawhub_skill(request: Request, slug: str) -> RemoteSkillRead:
+    return _skills(request).get_clawhub(slug)
 
 
 @router.post("/skills-remote/install", response_model=SkillMetadata, status_code=status.HTTP_201_CREATED)
 def install_remote_skill(
     request: Request, payload: RemoteSkillInstall, _: User = Depends(require_admin)
 ) -> SkillMetadata:
+    if payload.source == "clawhub":
+        if not payload.slug:
+            raise HiAgentError("SKILL_REMOTE_PATH_INVALID", "缺少 ClawHub Skill 标识")
+        return _skills(request).install_clawhub(
+            payload.slug, payload.version, confirm=payload.confirm, replace=payload.replace
+        )
     return _skills(request).install_remote(
         payload.catalog, payload.path, confirm=payload.confirm, replace=payload.replace
     )
@@ -650,8 +1002,12 @@ def create_skill(request: Request, payload: SkillCreateRequest, _: User = Depend
 
 
 @router.get("/sessions", response_model=list[SessionRead])
-def list_sessions(db: Session = Depends(get_db)) -> list[ChatSession]:
-    return list(db.scalars(select(ChatSession).order_by(ChatSession.updated_at.desc())).all())
+def list_sessions(project_id: str | None = Query(default=None), db: Session = Depends(get_db)) -> list[ChatSession]:
+    statement = select(ChatSession).order_by(ChatSession.updated_at.desc())
+    if project_id:
+        _get(db, Project, project_id, "Project")
+        statement = statement.where(ChatSession.project_id == project_id)
+    return list(db.scalars(statement).all())
 
 
 @router.post("/sessions", response_model=SessionRead, status_code=status.HTTP_201_CREATED)
@@ -659,7 +1015,10 @@ def create_session(payload: SessionCreate, db: Session = Depends(get_db)) -> Cha
     agent = _get(db, AgentConfig, payload.agent_id, "Agent")
     if not agent.enabled:
         raise HiAgentError("AGENT_DISABLED", "Agent 已禁用")
-    return _commit(db, ChatSession(**payload.model_dump()))
+    project = _get(db, Project, agent.project_id, "Project")
+    if project.status != "active":
+        raise ConflictError("PROJECT_ARCHIVED", "归档项目不能创建新会话")
+    return _commit(db, ChatSession(**payload.model_dump(), project_id=agent.project_id))
 
 
 @router.get("/sessions/{session_id}", response_model=SessionDetail)
@@ -703,9 +1062,13 @@ async def create_run(
     agent = _get(db, AgentConfig, chat_session.agent_id, "Agent")
     if not agent.enabled:
         raise HiAgentError("AGENT_DISABLED", "Agent 已禁用")
+    project = _get(db, Project, chat_session.project_id, "Project")
+    if project.status != "active":
+        raise ConflictError("PROJECT_ARCHIVED", "归档项目不能启动新 Run")
     snapshot = snapshot_agent(db, agent)
     run = Run(
         session_id=session_id,
+        project_id=chat_session.project_id,
         agent_id=agent.id,
         input=payload.message,
         status=RunStatus.queued.value,
@@ -725,16 +1088,66 @@ async def create_run(
 
 
 @router.get("/runs", response_model=list[RunRead])
-def list_runs(session_id: str | None = Query(default=None), db: Session = Depends(get_db)) -> list[Run]:
+def list_runs(
+    session_id: str | None = Query(default=None),
+    project_id: str | None = Query(default=None),
+    db: Session = Depends(get_db),
+) -> list[Run]:
     statement = select(Run).order_by(Run.created_at.desc())
     if session_id:
         statement = statement.where(Run.session_id == session_id)
+    if project_id:
+        _get(db, Project, project_id, "Project")
+        statement = statement.where(Run.project_id == project_id)
     return list(db.scalars(statement).all())
 
 
 @router.get("/runs/{run_id}", response_model=RunRead)
 def get_run(run_id: str, db: Session = Depends(get_db)) -> Run:
     return _get(db, Run, run_id, "Run")
+
+
+@router.post("/rag/reports")
+def download_rag_report(payload: RagReportCreate, db: Session = Depends(get_db)) -> Response:
+    run = _get(db, Run, payload.run_id, "Run")
+    if run.status != RunStatus.completed.value:
+        raise ConflictError("RAG_REPORT_RUN_NOT_COMPLETED", "只能导出已完成的 RAG Run")
+    snapshot_kb = run.config_snapshot.get("knowledge_base") or {}
+    if not snapshot_kb.get("id"):
+        raise ConflictError("RAG_REPORT_NOT_RAG_RUN", "该 Run 未绑定知识库，不能导出 RAG 报告")
+    events = list(db.scalars(select(RunEvent).where(RunEvent.run_id == run.id).order_by(RunEvent.id)).all())
+    completed = next((event for event in reversed(events) if event.type == "completed"), None)
+    citations = list((completed.data if completed else {}).get("citations", []))
+    workflow_labels = {
+        "load_session": "加载会话",
+        "retrieve": "知识检索",
+        "model_decision": "模型决策",
+        "tool_loop": "工具执行",
+        "finalize": "答案整理与引用",
+        "persist": "结果持久化",
+    }
+    workflow: list[str] = []
+    for event in events:
+        if event.type == "node_started":
+            node = str(event.data.get("node", ""))
+            label = workflow_labels.get(node, node)
+            if label and label not in workflow:
+                workflow.append(label)
+    data = RagReportData(
+        run_id=run.id,
+        knowledge_base=str(snapshot_kb.get("name") or "未绑定知识库"),
+        question=run.input,
+        answer=run.output,
+        workflow=workflow,
+        citations=citations,
+        generated_at=now_utc(),
+    )
+    content, filename, media_type = render_report(data, payload.format)
+    return Response(
+        content=content,
+        media_type=media_type,
+        headers={"Content-Disposition": f'attachment; filename="{filename}"', "X-Content-Type-Options": "nosniff"},
+    )
 
 
 @router.get("/runs/{run_id}/event-log", response_model=list[RunEventRead])

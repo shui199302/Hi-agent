@@ -13,6 +13,7 @@ from urllib.parse import urlparse
 
 from .config import Settings, get_settings
 from .errors import HiAgentError, ServiceUnavailableError
+from .mcp_presets import workspace_mcp_executable
 from .models import McpServerConfig
 from .schemas import McpToolRead
 
@@ -68,18 +69,36 @@ class McpClient:
         is_local = parsed.hostname in local_hosts
         if not is_local and parsed.scheme != "https":
             raise HiAgentError("MCP_HTTPS_REQUIRED", "远程 MCP 必须使用 HTTPS")
-        if not is_local and not (
-            self.settings.allow_remote_mcp and server.allow_remote
-        ):
+        if not is_local and not (self.settings.allow_remote_mcp and server.allow_remote):
             raise HiAgentError("MCP_REMOTE_DISABLED", "远程 MCP 默认关闭")
 
     def _stdio_environment(self, server: McpServerConfig) -> dict[str, str]:
+        inherited_names = (
+            "PATH",
+            "HOME",
+            "LANG",
+            "LC_ALL",
+            "PYTHONPATH",
+            "SYSTEMROOT",
+            "WINDIR",
+            "COMSPEC",
+            "PATHEXT",
+            "TEMP",
+            "TMP",
+            "USERPROFILE",
+            "APPDATA",
+            "LOCALAPPDATA",
+        )
         env = {
             key: value
-            for key in ("PATH", "HOME", "LANG", "LC_ALL", "PYTHONPATH")
+            for key in inherited_names
             if (value := os.getenv(key)) is not None
         }
-        for target, source in server.env_refs.items():
+        if server.builtin and server.name == "memory":
+            env["MEMORY_FILE_PATH"] = str(self.settings.data_dir / "mcp-memory.jsonl")
+        if server.builtin and server.name == "sequential-thinking":
+            env["DISABLE_THOUGHT_LOGGING"] = "true"
+        for target, source in (server.env_refs or {}).items():
             if value := self.settings.resolve_secret(source):
                 env[target] = value
         return env
@@ -157,13 +176,7 @@ class McpClient:
     def _is_trusted_builtin(self, server: McpServerConfig) -> bool:
         if server.transport != "stdio" or not server.command:
             return False
-        expected = (
-            self.settings.project_root
-            / "mcp_servers"
-            / ".venv"
-            / "bin"
-            / "hi-agent-mcp"
-        ).resolve()
+        expected = workspace_mcp_executable(self.settings.project_root).resolve()
         try:
             command = Path(server.command).resolve(strict=True)
         except OSError:

@@ -19,13 +19,20 @@ dependencies = [
   "python-dotenv>=1,<2",
   "python-docx>=1.1,<2",
   "python-multipart>=0.0.20,<1",
+  "python-pptx>=1.0,<2",
   "pypdf>=5,<7",
   "qdrant-client[fastembed]>=1.13,<2",
+  "reportlab>=4.2,<5",
   "sqlalchemy>=2.0,<3",
   "uvicorn[standard]>=0.34,<1",
 ]
 
 [project.optional-dependencies]
+ocr = [
+  "paddleocr>=3.3,<4",
+  "paddlepaddle>=3.2,<4",
+  "pypdfium2>=4.30,<5",
+]
 dev = [
   "mypy>=1.15,<2",
   "pytest>=8.3,<9",
@@ -57,5 +64,6 @@ exclude = ["tests"]
 warn_unused_ignores = false
 
 [[tool.mypy.overrides]]
-module = ["langgraph.*", "mcp.*", "qdrant_client.*", "fastembed.*", "pypdf.*", "docx.*"]
+module = ["langgraph.*", "mcp.*", "qdrant_client.*", "fastembed.*", "pypdf.*", "docx.*", "reportlab.*", "pptx.*", "paddleocr", "paddleocr.*", "pypdfium2", "pypdfium2.*"]
 ignore_missing_imports = true
+disable_error_code = ["import-not-found", "import-untyped"]

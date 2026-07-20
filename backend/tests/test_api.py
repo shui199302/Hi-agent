@@ -2,14 +2,18 @@ from __future__ import annotations
 
 import sqlite3
 import time
+from io import BytesIO
 from typing import Any
 
 from fastapi.testclient import TestClient
+from pypdf import PdfReader
+from reportlab.pdfgen import canvas
 
 from hi_agent.config import Settings
 from hi_agent.database import session_factory
 from hi_agent.main import create_app
 from hi_agent.models import RunCheckpoint
+from hi_agent.ocr import OcrPage
 
 
 def wait_for_status(client: TestClient, run_id: str, expected: set[str], timeout: float = 3) -> dict[str, Any]:
@@ -46,6 +50,41 @@ def create_mock_agent(client: TestClient, *, knowledge_base_id: str | None = Non
     )
     assert agent.status_code == 201, agent.text
     return agent.json()["id"]
+
+
+def test_common_mcp_presets_are_seeded_disabled_and_protected(client: TestClient) -> None:
+    response = client.get("/api/v1/mcp/servers")
+    assert response.status_code == 200, response.text
+    servers = {item["name"]: item for item in response.json()}
+    expected = {
+        "filesystem",
+        "git",
+        "fetch",
+        "time",
+        "memory",
+        "sequential-thinking",
+        "github-readonly",
+    }
+    assert expected <= servers.keys()
+    assert all(servers[name]["builtin"] for name in expected)
+    assert all(not servers[name]["enabled"] for name in expected)
+    assert all(servers[name]["description"] and servers[name]["source_url"] for name in expected)
+    assert "@2026.7.4" in servers["filesystem"]["args"][1]
+    assert servers["github-readonly"]["env_refs"] == {
+        "GITHUB_PERSONAL_ACCESS_TOKEN": "GITHUB_TOKEN"
+    }
+
+    preset_id = servers["filesystem"]["id"]
+    renamed = client.patch(f"/api/v1/mcp/servers/{preset_id}", json={"name": "renamed"})
+    assert renamed.status_code == 409
+    assert renamed.json()["error"]["code"] == "MCP_PRESET_BUILTIN"
+    removed = client.delete(f"/api/v1/mcp/servers/{preset_id}")
+    assert removed.status_code == 409
+    assert removed.json()["error"]["code"] == "MCP_PRESET_BUILTIN"
+
+    enabled = client.patch(f"/api/v1/mcp/servers/{preset_id}", json={"enabled": True})
+    assert enabled.status_code == 200, enabled.text
+    assert enabled.json()["enabled"] is True
 
 
 def test_health_crud_rag_run_and_resumable_events(client: TestClient) -> None:
@@ -97,9 +136,12 @@ def test_health_crud_rag_run_and_resumable_events(client: TestClient) -> None:
     assert exact_query.status_code == 200, exact_query.text
     assert exact_query.json()["total"] == 1
     assert exact_query.json()["items"][0]["id"] == kb_id
-    assert client.get(
-        "/api/v1/knowledge-bases/query", params={"name_exact": "城市资料", "status": "ready"}
-    ).json()["total"] == 0
+    assert (
+        client.get("/api/v1/knowledge-bases/query", params={"name_exact": "城市资料", "status": "ready"}).json()[
+            "total"
+        ]
+        == 0
+    )
 
     document_query = client.get(
         f"/api/v1/knowledge-bases/{kb_id}/documents/query",
@@ -150,9 +192,157 @@ def test_health_crud_rag_run_and_resumable_events(client: TestClient) -> None:
     assert "event: completed" in replay.text
     assert '"run_id"' in replay.text
 
+    for report_format, content_type in (
+        ("md", "text/markdown"),
+        ("docx", "application/vnd.openxmlformats-officedocument"),
+        ("pdf", "application/pdf"),
+    ):
+        report = client.post("/api/v1/rag/reports", json={"run_id": accepted["run_id"], "format": report_format})
+        assert report.status_code == 200, report.text
+        assert content_type in report.headers["content-type"]
+        assert report.headers["content-disposition"].endswith(f'.{report_format}"')
+        if report_format == "md":
+            assert "RAG 问答报告" in report.text and "guide.md" in report.text
+        elif report_format == "pdf":
+            assert "RAG" in (PdfReader(BytesIO(report.content)).pages[0].extract_text() or "")
     summary = client.get("/api/v1/observability/summary")
     assert summary.status_code == 200
     assert summary.json()["total_runs"] >= 1
+    trace = summary.json()["recent_runs"][0]
+    assert trace["agent_name"] and trace["project_name"]
+    assert trace["model_id"] == "mock-model"
+    assert {"provider", "session_title", "citation_count", "input_chars", "output_chars"} <= trace.keys()
+
+
+def test_project_owns_agents_and_knowledge_bases(client: TestClient) -> None:
+    project = client.post("/api/v1/projects", json={"name": "客户交付", "description": "隔离交付资源"})
+    assert project.status_code == 201, project.text
+    project_id = project.json()["id"]
+    kb = client.post("/api/v1/knowledge-bases", json={"name": "交付资料", "project_id": project_id})
+    assert kb.status_code == 201 and kb.json()["project_id"] == project_id
+    model = client.post(
+        "/api/v1/models",
+        json={"name": "project-mock", "base_url": "http://mock.local/v1", "model": "mock", "mock": True},
+    )
+    agent = client.post(
+        "/api/v1/agents",
+        json={
+            "name": "交付助手",
+            "project_id": project_id,
+            "model_endpoint_id": model.json()["id"],
+            "knowledge_base_id": kb.json()["id"],
+        },
+    )
+    assert agent.status_code == 201, agent.text
+    detail = client.get(f"/api/v1/projects/{project_id}").json()
+    assert detail["agent_count"] == 1 and detail["knowledge_base_count"] == 1
+    session = client.post("/api/v1/sessions", json={"agent_id": agent.json()["id"], "title": "项目历史"})
+    accepted = client.post(f"/api/v1/sessions/{session.json()['id']}/runs", json={"message": "记录项目归属"})
+    assert accepted.status_code == 202, accepted.text
+    assert wait_for_status(client, accepted.json()["run_id"], {"completed", "failed"})["status"] == "completed"
+    target = client.post("/api/v1/projects", json={"name": "迁移目标"}).json()
+    moved = client.patch(
+        f"/api/v1/agents/{agent.json()['id']}",
+        json={"project_id": target["id"], "knowledge_base_id": None},
+    )
+    assert moved.status_code == 200, moved.text
+    old_detail = client.get(f"/api/v1/projects/{project_id}").json()
+    new_detail = client.get(f"/api/v1/projects/{target['id']}").json()
+    assert (old_detail["session_count"], old_detail["run_count"]) == (1, 1)
+    assert (new_detail["agent_count"], new_detail["session_count"], new_detail["run_count"]) == (1, 0, 0)
+    archived = client.patch(f"/api/v1/projects/{project_id}", json={"status": "archived"})
+    assert archived.status_code == 200
+    blocked_run = client.post(f"/api/v1/sessions/{session.json()['id']}/runs", json={"message": "不应运行"})
+    assert blocked_run.status_code == 409 and blocked_run.json()["error"]["code"] == "PROJECT_ARCHIVED"
+    blocked = client.delete(f"/api/v1/projects/{project_id}")
+    assert blocked.status_code == 409 and blocked.json()["error"]["code"] == "PROJECT_IN_USE"
+
+
+def test_non_rag_run_cannot_be_exported_as_rag_report(client: TestClient) -> None:
+    model = client.post(
+        "/api/v1/models",
+        json={"name": "plain-report-model", "base_url": "http://mock.local/v1", "model": "mock", "mock": True},
+    ).json()
+    agent = client.post(
+        "/api/v1/agents",
+        json={"name": "普通助手", "model_endpoint_id": model["id"]},
+    ).json()
+    session = client.post("/api/v1/sessions", json={"agent_id": agent["id"]}).json()
+    accepted = client.post(f"/api/v1/sessions/{session['id']}/runs", json={"message": "普通问答"}).json()
+    assert wait_for_status(client, accepted["run_id"], {"completed", "failed"})["status"] == "completed"
+    report = client.post("/api/v1/rag/reports", json={"run_id": accepted["run_id"], "format": "md"})
+    assert report.status_code == 409
+    assert report.json()["error"]["code"] == "RAG_REPORT_NOT_RAG_RUN"
+
+
+def test_project_bulk_assigns_multiple_agents(client: TestClient) -> None:
+    source = client.post("/api/v1/projects", json={"name": "批量来源"}).json()
+    target = client.post("/api/v1/projects", json={"name": "批量目标"}).json()
+    agents = [
+        client.post("/api/v1/agents", json={"name": f"批量助手{index}", "project_id": source["id"]}).json()
+        for index in range(2)
+    ]
+    assigned = client.post(
+        f"/api/v1/projects/{target['id']}/agents:assign",
+        json={"agent_ids": [item["id"] for item in agents]},
+    )
+    assert assigned.status_code == 200, assigned.text
+    assert {item["id"] for item in assigned.json()} == {item["id"] for item in agents}
+    assert client.get(f"/api/v1/projects/{source['id']}").json()["agent_count"] == 0
+    assert client.get(f"/api/v1/projects/{target['id']}").json()["agent_count"] == 2
+
+
+def test_prompt_template_crud_and_builtin_protection(client: TestClient) -> None:
+    builtin = client.get("/api/v1/prompt-templates").json()
+    assert len(builtin) >= 5 and all(item["builtin"] for item in builtin[:5])
+    protected = client.patch(f"/api/v1/prompt-templates/{builtin[0]['id']}", json={"name": "不能修改"})
+    assert protected.status_code == 409
+    created = client.post(
+        "/api/v1/prompt-templates",
+        json={
+            "name": "客服回复模板",
+            "description": "规范客服回复",
+            "category": "writing",
+            "content": "你是客服助手，请准确说明处理结果并给出下一步。",
+            "variables": [],
+            "tags": ["客服"],
+        },
+    )
+    assert created.status_code == 201, created.text
+    template_id = created.json()["id"]
+    updated = client.patch(f"/api/v1/prompt-templates/{template_id}", json={"description": "更新后的说明"})
+    assert updated.status_code == 200 and updated.json()["description"] == "更新后的说明"
+    assert client.delete(f"/api/v1/prompt-templates/{template_id}").status_code == 204
+
+
+def test_builtin_digital_human_agent_generates_closed_avatar_spec(client: TestClient) -> None:
+    agents = client.get("/api/v1/agents").json()
+    designer = next(item for item in agents if item["agent_type"] == "digital_human")
+    assert designer["builtin"] is True
+    assert client.patch(f"/api/v1/agents/{designer['id']}", json={"name": "不能修改"}).status_code == 409
+    assert client.delete(f"/api/v1/agents/{designer['id']}").status_code == 409
+
+    generated = client.post(
+        "/api/v1/digital-humans/generate",
+        json={"description": "一个自信的银色短发女生，蓝色眼睛，穿绿色卫衣，戴眼镜，叫小禾"},
+    )
+    assert generated.status_code == 200, generated.text
+    body = generated.json()
+    assert body["agent_id"] == designer["id"]
+    assert body["spec"] == {
+        **body["spec"],
+        "name": "小禾",
+        "presentation": "feminine",
+        "hair_style": "short",
+        "hair_color": "#B7BCC8",
+        "eye_color": "#4F79A7",
+        "outfit": "hoodie",
+        "outfit_color": "#2E8B68",
+        "accessory": "glasses",
+        "expression": "confident",
+    }
+    repeated = client.post("/api/v1/digital-humans/generate", json={"description": body["description"]})
+    assert repeated.json()["spec"] == body["spec"]
 
 
 def test_create_skill_requires_confirmation_and_stays_in_skill_root(client: TestClient) -> None:
@@ -274,9 +464,7 @@ def test_authentication_csrf_and_user_resource_isolation(client: TestClient) -> 
 
     other = TestClient(client.app)
     assert other.get("/api/v1/models").status_code == 401
-    issued = other.post(
-        "/api/v1/auth/phone/code", json={"phone": "13900000000", "purpose": "register"}
-    )
+    issued = other.post("/api/v1/auth/phone/code", json={"phone": "13900000000", "purpose": "register"})
     registered = other.post(
         "/api/v1/auth/phone/register",
         json={"phone": "13900000000", "code": issued.json()["debug_code"], "username": "隔离用户"},
@@ -284,6 +472,7 @@ def test_authentication_csrf_and_user_resource_isolation(client: TestClient) -> 
     assert registered.status_code == 200, registered.text
     other.headers["X-CSRF-Token"] = registered.json()["csrf_token"]
     assert other.get("/api/v1/models").json() == []
+    assert len(other.get("/api/v1/prompt-templates").json()) >= 5
     assert other.get(f"/api/v1/models/{original.json()['id']}").status_code == 404
     forbidden_secret = other.post(
         "/api/v1/models",
@@ -355,3 +544,68 @@ def test_spa_fallback_never_swallows_unknown_api(settings: Settings) -> None:
         assert unknown.status_code == 404
         assert unknown.headers["content-type"].startswith("application/json")
         assert unknown.json()["error"]["code"] == "API_NOT_FOUND"
+
+
+def test_artifact_report_presentation_and_download(client: TestClient) -> None:
+    project_id = client.get("/api/v1/projects").json()[0]["id"]
+    missing_image_endpoint = client.post(
+        "/api/v1/artifacts/images",
+        json={"project_id": project_id, "prompt": "原创绿色机器人"},
+    )
+    assert missing_image_endpoint.status_code == 409
+    assert missing_image_endpoint.json()["error"]["code"] == "IMAGE_ENDPOINT_REQUIRED"
+    report = client.post(
+        "/api/v1/artifacts/reports",
+        json={"project_id": project_id, "title": "验收报告", "content": "第一章\n测试通过", "format": "docx"},
+    )
+    assert report.status_code == 201, report.text
+    downloaded = client.get(f"/api/v1/artifacts/{report.json()['id']}/download")
+    assert downloaded.status_code == 200
+    assert downloaded.content.startswith(b"PK")
+    assert downloaded.headers["x-content-type-options"] == "nosniff"
+
+    presentation = client.post(
+        "/api/v1/artifacts/presentations",
+        json={
+            "project_id": project_id,
+            "title": "季度总结",
+            "slides": [{"title": "成果", "bullets": ["完成 RAG", "完成 OCR"]}],
+        },
+    )
+    assert presentation.status_code == 201, presentation.text
+    assert presentation.json()["kind"] == "presentation"
+    agent_id = create_mock_agent(client)
+    chat_session = client.post("/api/v1/sessions", json={"title": "报告运行", "agent_id": agent_id}).json()
+    accepted = client.post(f"/api/v1/sessions/{chat_session['id']}/runs", json={"message": "生成运行报告测试"}).json()
+    wait_for_status(client, accepted["run_id"], {"completed"})
+    run_report = client.post(
+        "/api/v1/artifacts/run-reports",
+        json={"run_id": accepted["run_id"], "format": "pdf"},
+    )
+    assert run_report.status_code == 201, run_report.text
+    assert run_report.json()["run_id"] == accepted["run_id"]
+    assert client.get(f"/api/v1/artifacts/{run_report.json()['id']}/download").content.startswith(b"%PDF")
+    assert len(client.get("/api/v1/artifacts").json()) == 3
+
+
+def test_scanned_pdf_uses_paddleocr_page_fallback(client: TestClient) -> None:
+    kb = client.post(
+        "/api/v1/knowledge-bases",
+        json={"name": "扫描文档", "ocr_mode": "auto", "ocr_language": "ch", "ocr_min_chars": 30},
+    )
+    assert kb.status_code == 201, kb.text
+    buffer = BytesIO()
+    pdf = canvas.Canvas(buffer)
+    pdf.showPage()
+    pdf.save()
+
+    rag = client.app.state.rag_service
+    rag.ocr.recognize_pdf_pages = lambda *_args, **_kwargs: [OcrPage(1, "百度飞桨 OCR 识别成功")]
+    uploaded = client.post(
+        f"/api/v1/knowledge-bases/{kb.json()['id']}/documents",
+        files={"file": ("scan.pdf", buffer.getvalue(), "application/pdf")},
+    )
+    assert uploaded.status_code == 201, uploaded.text
+    assert uploaded.json()["extraction_method"] == "ocr"
+    assert uploaded.json()["ocr_pages"] == [1]
+    assert uploaded.json()["ocr_engine"] == "PaddleOCR 3.x"

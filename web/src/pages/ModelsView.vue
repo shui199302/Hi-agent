@@ -7,9 +7,10 @@ import LoadingState from '../components/LoadingState.vue'
 import ModalDialog from '../components/ModalDialog.vue'
 import StatusBadge from '../components/StatusBadge.vue'
 import { notify } from '../notifications'
-import type { ModelEndpoint, SystemStatus } from '../types'
+import type { ImageEndpoint, ModelEndpoint, SystemStatus } from '../types'
 
 const models = ref<ModelEndpoint[]>([])
+const imageEndpoints = ref<ImageEndpoint[]>([])
 const status = ref<SystemStatus | null>(null)
 const loading = ref(true)
 const loadError = ref('')
@@ -17,6 +18,10 @@ const modalOpen = ref(false)
 const saving = ref(false)
 const editingId = ref<string | null>(null)
 const lastRefresh = ref<Date | null>(null)
+const imageModalOpen = ref(false)
+const imageSaving = ref(false)
+const editingImageId = ref<string | null>(null)
+const imageForm = reactive({ name: '', base_url: 'https://api.openai.com/v1', model: 'gpt-image-1', api_key_env: 'OPENAI_API_KEY', timeout_seconds: 180, enabled: true })
 
 const form = reactive({
   name: '', base_url: 'http://127.0.0.1:8000/v1', model: '', api_key_env: 'HI_AGENT_LLM_API_KEY',
@@ -49,11 +54,13 @@ async function load(): Promise<void> {
   loading.value = true
   loadError.value = ''
   try {
-    const [modelData, statusData] = await Promise.all([
+    const [modelData, imageData, statusData] = await Promise.all([
       request<ModelEndpoint[] | { items: ModelEndpoint[] }>('/models'),
+      request<ImageEndpoint[]>('/image-endpoints'),
       request<SystemStatus>('/system/status'),
     ])
     models.value = listOf(modelData)
+    imageEndpoints.value = imageData
     status.value = statusData
     lastRefresh.value = new Date()
   } catch (error) {
@@ -61,6 +68,32 @@ async function load(): Promise<void> {
   } finally {
     loading.value = false
   }
+}
+
+function openImage(endpoint?: ImageEndpoint): void {
+  editingImageId.value = endpoint?.id ?? null
+  Object.assign(imageForm, endpoint ? { ...endpoint } : { name: '', base_url: 'https://api.openai.com/v1', model: 'gpt-image-1', api_key_env: 'OPENAI_API_KEY', timeout_seconds: 180, enabled: true })
+  imageModalOpen.value = true
+}
+
+async function saveImage(): Promise<void> {
+  imageSaving.value = true
+  try {
+    await request(editingImageId.value ? `/image-endpoints/${editingImageId.value}` : '/image-endpoints', { method: editingImageId.value ? 'PATCH' : 'POST', ...jsonBody(imageForm) })
+    notify('图像端点已保存', 'success'); imageModalOpen.value = false; await load()
+  } catch (error) { notify(formatApiError(error), 'error') }
+  finally { imageSaving.value = false }
+}
+
+async function toggleImage(endpoint: ImageEndpoint): Promise<void> {
+  try { await request(`/image-endpoints/${endpoint.id}`, { method: 'PATCH', ...jsonBody({ enabled: !endpoint.enabled }) }); await load() }
+  catch (error) { notify(formatApiError(error), 'error') }
+}
+
+async function removeImage(endpoint: ImageEndpoint): Promise<void> {
+  if (!window.confirm(`确认删除图像端点“${endpoint.name}”？`)) return
+  try { await request(`/image-endpoints/${endpoint.id}`, { method: 'DELETE' }); await load() }
+  catch (error) { notify(formatApiError(error), 'error') }
 }
 
 async function save(): Promise<void> {
@@ -160,6 +193,12 @@ onActivated(() => { if (!loading.value) void load() })
           </div>
         </section>
 
+        <section class="model-section">
+          <div class="section-heading"><div><h2>图像生成端点</h2><p>独立调用 OpenAI-compatible Images API；密钥仍只保存环境变量名</p></div><button class="button secondary small" type="button" @click="openImage()"><AppIcon name="plus" :size="14" />添加图像端点</button></div>
+          <EmptyState v-if="imageEndpoints.length === 0" icon="sparkles" title="尚未配置图像模型" description="配置后，智能体可在审批通过后生成图片并提供下载。" />
+          <div v-else class="endpoint-list"><article v-for="endpoint in imageEndpoints" :key="endpoint.id" class="endpoint panel"><div class="endpoint-brand"><span>IMG</span></div><div class="endpoint-copy"><header><h3>{{ endpoint.name }}</h3><StatusBadge :status="endpoint.enabled ? 'enabled' : 'disabled'" /></header><strong>{{ endpoint.model }}</strong><button type="button" @click="copy(endpoint.base_url)"><code>{{ endpoint.base_url }}</code><AppIcon name="copy" :size="12" /></button><div class="endpoint-facts"><span>KEY <b>{{ endpoint.api_key_env }}</b></span><span>TIMEOUT <b>{{ endpoint.timeout_seconds }}s</b></span></div></div><div class="endpoint-actions"><button class="switch" :class="{ on: endpoint.enabled }" type="button" @click="toggleImage(endpoint)" /><button class="icon-button" type="button" @click="openImage(endpoint)"><AppIcon name="edit" :size="16" /></button><button class="icon-button remove" type="button" @click="removeImage(endpoint)"><AppIcon name="trash" :size="16" /></button></div></article></div>
+        </section>
+
         <section class="vllm-note panel">
           <div class="vllm-logo"><AppIcon name="server" :size="22" /></div>
           <div><span>LINUX · NVIDIA</span><h2>vLLM 部署已独立配置</h2><p>Mac 作为客户端连接远端 <code>/v1</code>。请在 GPU 主机使用 <code>deploy/vllm-compose.yml</code> 启动 v0.23.0。</p></div>
@@ -179,6 +218,10 @@ onActivated(() => { if (!loading.value) void load() })
         <div class="field"><div class="switch-row"><span class="switch-copy"><strong>Fake Model</strong><span>仅用于离线测试</span></span><button class="switch" :class="{ on: form.mock }" type="button" @click="form.mock = !form.mock" /></div></div>
       </form>
       <template #footer><button class="button secondary" type="button" @click="modalOpen = false">取消</button><button class="button" type="button" :disabled="saving" @click="save">{{ saving ? '保存中…' : '保存端点' }}</button></template>
+    </ModalDialog>
+    <ModalDialog :open="imageModalOpen" :title="editingImageId ? '编辑图像端点' : '添加图像端点'" description="兼容 POST /images/generations，并要求返回 b64_json" @close="imageModalOpen = false">
+      <form class="form-grid" @submit.prevent="saveImage"><div class="field"><label>显示名称</label><input v-model="imageForm.name" class="input" /></div><div class="field"><label>模型 ID</label><input v-model="imageForm.model" class="input mono" /></div><div class="field full"><label>Base URL</label><input v-model="imageForm.base_url" class="input mono" type="url" /></div><div class="field"><label>API Key 环境变量</label><input v-model="imageForm.api_key_env" class="input mono" pattern="[A-Z][A-Z0-9_]+" /></div><div class="field"><label>超时（秒）</label><input v-model.number="imageForm.timeout_seconds" class="input" type="number" min="1" max="600" /></div><div class="field full"><div class="switch-row"><span class="switch-copy"><strong>启用图像端点</strong><span>同一用户首个启用端点会供智能体使用</span></span><button class="switch" :class="{ on: imageForm.enabled }" type="button" @click="imageForm.enabled = !imageForm.enabled" /></div></div></form>
+      <template #footer><button class="button secondary" type="button" @click="imageModalOpen = false">取消</button><button class="button" type="button" :disabled="imageSaving" @click="saveImage">{{ imageSaving ? '保存中…' : '保存端点' }}</button></template>
     </ModalDialog>
   </div>
 </template>

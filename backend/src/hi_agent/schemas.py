@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from datetime import datetime
 from typing import Any, Literal
 
@@ -128,13 +129,157 @@ class ModelEndpointRead(ApiModel):
     updated_at: datetime
 
 
+class ImageEndpointBase(BaseModel):
+    name: str = Field(min_length=1, max_length=120)
+    base_url: AnyHttpUrl
+    model: str = Field(min_length=1, max_length=250)
+    api_key_env: str = Field(pattern=r"^[A-Z][A-Z0-9_]{1,119}$")
+    timeout_seconds: float = Field(default=180.0, ge=1, le=600)
+    enabled: bool = True
+
+    @field_validator("base_url")
+    @classmethod
+    def secure_image_endpoint(cls, value: AnyHttpUrl) -> AnyHttpUrl:
+        if value.scheme != "https" and value.host not in {"127.0.0.1", "localhost", "::1"}:
+            raise ValueError("remote image endpoint must use HTTPS")
+        return value
+
+
+class ImageEndpointCreate(ImageEndpointBase):
+    pass
+
+
+class ImageEndpointUpdate(BaseModel):
+    name: str | None = Field(default=None, min_length=1, max_length=120)
+    base_url: AnyHttpUrl | None = None
+    model: str | None = Field(default=None, min_length=1, max_length=250)
+    api_key_env: str | None = Field(default=None, pattern=r"^[A-Z][A-Z0-9_]{1,119}$")
+    timeout_seconds: float | None = Field(default=None, ge=1, le=600)
+    enabled: bool | None = None
+
+    @field_validator("base_url")
+    @classmethod
+    def secure_image_endpoint(cls, value: AnyHttpUrl | None) -> AnyHttpUrl | None:
+        if value is not None and value.scheme != "https" and value.host not in {"127.0.0.1", "localhost", "::1"}:
+            raise ValueError("remote image endpoint must use HTTPS")
+        return value
+
+
+class ImageEndpointRead(ApiModel):
+    id: str
+    name: str
+    base_url: str
+    model: str
+    api_key_env: str
+    timeout_seconds: float
+    enabled: bool
+    created_at: datetime
+    updated_at: datetime
+
+
+class ProjectCreate(BaseModel):
+    name: str = Field(min_length=1, max_length=120)
+    description: str = Field(default="", max_length=4000)
+
+
+class ProjectUpdate(BaseModel):
+    name: str | None = Field(default=None, min_length=1, max_length=120)
+    description: str | None = Field(default=None, max_length=4000)
+    status: Literal["active", "archived"] | None = None
+
+
+class ProjectRead(ApiModel):
+    id: str
+    name: str
+    description: str
+    status: Literal["active", "archived"]
+    agent_count: int = 0
+    knowledge_base_count: int = 0
+    session_count: int = 0
+    run_count: int = 0
+    last_activity_at: datetime | None = None
+    created_at: datetime
+    updated_at: datetime
+
+
+class ProjectAgentAssign(BaseModel):
+    agent_ids: list[str] = Field(min_length=1, max_length=100)
+
+    @field_validator("agent_ids")
+    @classmethod
+    def unique_agent_ids(cls, value: list[str]) -> list[str]:
+        if len(set(value)) != len(value):
+            raise ValueError("agent_ids must be unique")
+        return value
+
+
+class PromptTemplateBase(BaseModel):
+    name: str = Field(min_length=1, max_length=120)
+    description: str = Field(default="", max_length=4000)
+    category: Literal["general", "rag", "research", "analysis", "writing", "coding", "custom"] = "custom"
+    content: str = Field(min_length=10, max_length=100_000)
+    variables: list[str] = Field(default_factory=list, max_length=50)
+    tags: list[str] = Field(default_factory=list, max_length=30)
+    enabled: bool = True
+
+    @field_validator("variables")
+    @classmethod
+    def valid_variables(cls, value: list[str]) -> list[str]:
+        invalid = any(not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]{0,63}", item) for item in value)
+        if len(set(value)) != len(value) or invalid:
+            raise ValueError("variables must be unique identifier names")
+        return value
+
+
+class PromptTemplateCreate(PromptTemplateBase):
+    pass
+
+
+class PromptTemplateUpdate(BaseModel):
+    name: str | None = Field(default=None, min_length=1, max_length=120)
+    description: str | None = Field(default=None, max_length=4000)
+    category: Literal["general", "rag", "research", "analysis", "writing", "coding", "custom"] | None = None
+    content: str | None = Field(default=None, min_length=10, max_length=100_000)
+    variables: list[str] | None = Field(default=None, max_length=50)
+    tags: list[str] | None = Field(default=None, max_length=30)
+    enabled: bool | None = None
+
+    @field_validator("variables")
+    @classmethod
+    def valid_variables(cls, value: list[str] | None) -> list[str] | None:
+        if value is None:
+            return value
+        invalid = any(not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]{0,63}", item) for item in value)
+        if len(set(value)) != len(value) or invalid:
+            raise ValueError("variables must be unique identifier names")
+        return value
+
+
+class PromptTemplateRead(ApiModel):
+    id: str
+    name: str
+    description: str
+    category: str
+    content: str
+    variables: list[str]
+    tags: list[str]
+    builtin: bool
+    enabled: bool
+    created_at: datetime
+    updated_at: datetime
+
+
 class KnowledgeBaseBase(BaseModel):
+    project_id: str | None = None
     name: str = Field(min_length=1, max_length=120)
     description: str = Field(default="", max_length=4000)
     embedding_model: str = Field(default="BAAI/bge-small-zh-v1.5", min_length=1, max_length=250)
     chunk_size: int = Field(default=800, ge=100, le=4000)
     chunk_overlap: int = Field(default=120, ge=0, le=1000)
     top_k: int = Field(default=5, ge=1, le=50)
+    ocr_mode: Literal["off", "auto", "force"] = "auto"
+    ocr_language: Literal["ch", "en"] = "ch"
+    ocr_min_chars: int = Field(default=30, ge=0, le=1000)
 
     @model_validator(mode="after")
     def overlap_is_smaller(self) -> KnowledgeBaseBase:
@@ -148,9 +293,13 @@ class KnowledgeBaseCreate(KnowledgeBaseBase):
 
 
 class KnowledgeBaseUpdate(BaseModel):
+    project_id: str | None = None
     name: str | None = Field(default=None, min_length=1, max_length=120)
     description: str | None = Field(default=None, max_length=4000)
     top_k: int | None = Field(default=None, ge=1, le=50)
+    ocr_mode: Literal["off", "auto", "force"] | None = None
+    ocr_language: Literal["ch", "en"] | None = None
+    ocr_min_chars: int | None = Field(default=None, ge=0, le=1000)
 
 
 class KnowledgeBaseReindex(BaseModel):
@@ -158,6 +307,9 @@ class KnowledgeBaseReindex(BaseModel):
     chunk_size: int = Field(ge=100, le=4000)
     chunk_overlap: int = Field(ge=0, le=1000)
     top_k: int = Field(ge=1, le=50)
+    ocr_mode: Literal["off", "auto", "force"] = "auto"
+    ocr_language: Literal["ch", "en"] = "ch"
+    ocr_min_chars: int = Field(default=30, ge=0, le=1000)
 
     @model_validator(mode="after")
     def overlap_is_smaller(self) -> KnowledgeBaseReindex:
@@ -168,12 +320,16 @@ class KnowledgeBaseReindex(BaseModel):
 
 class KnowledgeBaseRead(ApiModel):
     id: str
+    project_id: str
     name: str
     description: str
     embedding_model: str
     chunk_size: int
     chunk_overlap: int
     top_k: int
+    ocr_mode: str
+    ocr_language: str
+    ocr_min_chars: int
     document_count: int = 0
     chunk_count: int = 0
     ready_document_count: int = 0
@@ -196,7 +352,48 @@ class DocumentRead(ApiModel):
     status: str
     error: str | None
     chunk_count: int
+    extraction_method: str
+    ocr_pages: list[int]
+    ocr_engine: str | None
     created_at: datetime
+
+
+class ArtifactRead(ApiModel):
+    id: str
+    project_id: str
+    run_id: str | None
+    kind: str
+    filename: str
+    media_type: str
+    size_bytes: int
+    sha256: str
+    status: str
+    metadata_json: dict[str, Any]
+    created_at: datetime
+
+
+class ArtifactReportCreate(BaseModel):
+    project_id: str
+    title: str = Field(min_length=1, max_length=200)
+    content: str = Field(min_length=1, max_length=500_000)
+    format: Literal["md", "docx", "pdf"] = "md"
+
+
+class ArtifactPresentationCreate(BaseModel):
+    project_id: str
+    title: str = Field(min_length=1, max_length=200)
+    slides: list[dict[str, Any]] = Field(min_length=1, max_length=30)
+
+
+class ArtifactImageCreate(BaseModel):
+    project_id: str
+    image_endpoint_id: str | None = None
+    prompt: str = Field(min_length=2, max_length=8000)
+
+
+class ArtifactRunReportCreate(BaseModel):
+    run_id: str
+    format: Literal["md", "docx", "pdf"] = "pdf"
 
 
 class KnowledgeBaseQueryResponse(BaseModel):
@@ -243,6 +440,7 @@ class McpServerBase(BaseModel):
         max_length=32,
         pattern=r"^[a-z0-9][a-z0-9_-]*$",
     )
+    description: str = Field(default="", max_length=1000)
     transport: Literal["stdio", "streamable_http"]
     command: str | None = Field(default=None, max_length=500)
     args: list[str] = Field(default_factory=list, max_length=100)
@@ -279,6 +477,7 @@ class McpServerUpdate(BaseModel):
         max_length=32,
         pattern=r"^[a-z0-9][a-z0-9_-]*$",
     )
+    description: str | None = Field(default=None, max_length=1000)
     command: str | None = Field(default=None, max_length=500)
     args: list[str] | None = Field(default=None, max_length=100)
     url: AnyHttpUrl | None = None
@@ -290,6 +489,10 @@ class McpServerUpdate(BaseModel):
 class McpServerRead(ApiModel):
     id: str
     name: str
+    description: str
+    source_url: str | None
+    setup_hint: str
+    builtin: bool
     transport: str
     command: str | None
     args: list[str]
@@ -317,6 +520,7 @@ class McpProbeResponse(BaseModel):
 
 
 class AgentBase(BaseModel):
+    project_id: str | None = None
     name: str = Field(min_length=1, max_length=120)
     description: str = Field(default="", max_length=4000)
     system_prompt: str = Field(default="你是一个可靠的中文智能体助手。", min_length=1, max_length=100_000)
@@ -326,6 +530,9 @@ class AgentBase(BaseModel):
     mcp_servers: list[str] = Field(default_factory=list)
     tool_policy: dict[str, Any] = Field(default_factory=dict)
     max_tool_loops: int = Field(default=12, ge=1, le=12)
+    review_policy: Literal["off", "auto", "manual", "risk_based"] = "risk_based"
+    review_model_endpoint_id: str | None = None
+    review_max_rounds: int = Field(default=2, ge=0, le=3)
     enabled: bool = True
 
 
@@ -334,6 +541,7 @@ class AgentCreate(AgentBase):
 
 
 class AgentUpdate(BaseModel):
+    project_id: str | None = None
     name: str | None = Field(default=None, min_length=1, max_length=120)
     description: str | None = Field(default=None, max_length=4000)
     system_prompt: str | None = Field(default=None, min_length=1, max_length=100_000)
@@ -343,11 +551,15 @@ class AgentUpdate(BaseModel):
     mcp_servers: list[str] | None = None
     tool_policy: dict[str, Any] | None = None
     max_tool_loops: int | None = Field(default=None, ge=1, le=12)
+    review_policy: Literal["off", "auto", "manual", "risk_based"] | None = None
+    review_model_endpoint_id: str | None = None
+    review_max_rounds: int | None = Field(default=None, ge=0, le=3)
     enabled: bool | None = None
 
 
 class AgentRead(ApiModel):
     id: str
+    project_id: str
     name: str
     description: str
     system_prompt: str
@@ -357,6 +569,11 @@ class AgentRead(ApiModel):
     mcp_servers: list[str]
     tool_policy: dict[str, Any]
     max_tool_loops: int
+    review_policy: str
+    review_model_endpoint_id: str | None
+    review_max_rounds: int
+    agent_type: str
+    builtin: bool
     enabled: bool
     created_at: datetime
     updated_at: datetime
@@ -371,6 +588,34 @@ class AgentRevisionRead(ApiModel):
     created_at: datetime
 
 
+class DigitalHumanGenerate(BaseModel):
+    description: str = Field(min_length=2, max_length=1000)
+
+
+class DigitalHumanSpec(BaseModel):
+    version: int
+    name: str
+    presentation: Literal["feminine", "masculine", "neutral"]
+    skin_tone: str
+    hair_style: Literal["short", "long", "curly", "bun", "bald"]
+    hair_color: str
+    eye_color: str
+    outfit: Literal["tshirt", "hoodie", "suit", "dress", "jacket"]
+    outfit_color: str
+    accent_color: str
+    accessory: Literal["none", "glasses", "headphones", "earrings"]
+    expression: Literal["smile", "calm", "confident", "cool"]
+    background: str
+    seed: int
+
+
+class DigitalHumanGenerateResponse(BaseModel):
+    agent_id: str
+    agent_name: str
+    description: str
+    spec: DigitalHumanSpec
+
+
 class SkillMetadata(BaseModel):
     name: str
     description: str
@@ -379,6 +624,10 @@ class SkillMetadata(BaseModel):
     scripts_allowed: bool
     valid: bool
     error: str | None = None
+    source: str = "builtin"
+    version: str | None = None
+    publisher: str | None = None
+    sha256: str | None = None
 
 
 class SkillDetail(SkillMetadata):
@@ -388,20 +637,31 @@ class SkillDetail(SkillMetadata):
 
 
 class RemoteSkillRead(BaseModel):
-    catalog: str
-    repository: str
-    ref: str
-    path: str
+    source: Literal["github", "clawhub"] = "github"
+    catalog: str = ""
+    repository: str = ""
+    ref: str = ""
+    path: str = ""
     name: str
     description: str
     source_url: str
     has_scripts: bool = False
     license: str | None = None
+    slug: str | None = None
+    version: str | None = None
+    publisher: str | None = None
+    security_verdict: str | None = None
+    downloads: int | None = None
+    sha256: str | None = None
+    instructions_preview: str | None = None
 
 
 class RemoteSkillInstall(BaseModel):
-    catalog: str = Field(min_length=1, max_length=200)
-    path: str = Field(min_length=1, max_length=500)
+    source: Literal["github", "clawhub"] = "github"
+    catalog: str = Field(default="", max_length=200)
+    path: str = Field(default="", max_length=500)
+    slug: str | None = Field(default=None, max_length=120)
+    version: str | None = Field(default=None, max_length=80)
     confirm: bool
     replace: bool = False
 
@@ -435,6 +695,7 @@ class MessageRead(ApiModel):
 
 class SessionRead(ApiModel):
     id: str
+    project_id: str
     title: str
     agent_id: str
     created_at: datetime
@@ -465,6 +726,7 @@ class Citation(BaseModel):
 
 class RunRead(ApiModel):
     id: str
+    project_id: str
     session_id: str
     agent_id: str
     status: str
@@ -476,6 +738,11 @@ class RunRead(ApiModel):
     created_at: datetime
     started_at: datetime | None
     finished_at: datetime | None
+
+
+class RagReportCreate(BaseModel):
+    run_id: str
+    format: Literal["md", "docx", "pdf"]
 
 
 class RunEventRead(ApiModel):
@@ -494,6 +761,7 @@ class ApprovalDecision(BaseModel):
 class ApprovalRead(ApiModel):
     id: str
     run_id: str
+    kind: str
     tool_name: str
     arguments: dict[str, Any]
     risk: str

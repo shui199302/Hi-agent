@@ -32,6 +32,21 @@ test.beforeEach(async ({ page }) => {
       })
       return
     }
+    if (url.pathname.endsWith('/digital-humans/generate')) {
+      await route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({
+          agent_id: 'digital-agent', agent_name: '数字人形象设计师', description: '测试数字人',
+          spec: {
+            version: 1, name: '小禾', presentation: 'feminine', skin_tone: '#E7AC84', hair_style: 'short',
+            hair_color: '#262522', eye_color: '#4F79A7', outfit: 'hoodie', outfit_color: '#2E8B68',
+            accent_color: '#B7E561', accessory: 'glasses', expression: 'smile', background: '#E7F5EC', seed: 1,
+          },
+        }),
+      })
+      return
+    }
     await route.fulfill({ status: 200, contentType: 'application/json', body: '[]' })
   })
 })
@@ -42,14 +57,45 @@ test('renders the Chinese console shell and navigates between major areas', asyn
   await expect(page).toHaveTitle(/Hi-agent/)
   await expect(page.getByText('LOCAL AI STUDIO')).toBeVisible()
   await expect(page.getByRole('heading', { name: '对话与运行' })).toBeVisible()
+  const menuLabels = await page.locator('.primary-nav .nav-copy strong').allTextContents()
+  expect(menuLabels.indexOf('内容生成')).toBe(menuLabels.indexOf('运行监测') - 1)
 
   await page.getByRole('button', { name: /知识库/ }).first().click()
   await expect(page).toHaveURL(/#\/knowledge$/)
   await expect(page.getByRole('heading', { name: '知识库列表', exact: true })).toBeVisible()
 
-  await page.getByRole('button', { name: /模型与系统/ }).first().click()
-  await expect(page).toHaveURL(/#\/models$/)
+  await page.getByRole('button', { name: /^设置/ }).first().click()
+  await expect(page).toHaveURL(/#\/settings$/)
+  const settings = page.getByRole('navigation', { name: '设置分类' })
+  await settings.getByRole('button', { name: /^MCP/ }).click()
+  await expect(page).toHaveURL(/#\/settings\/mcp$/)
+  await expect(page.getByRole('heading', { name: 'MCP 服务', exact: true })).toBeVisible()
+  await settings.getByRole('button', { name: /^Skills/ }).click()
+  await expect(page).toHaveURL(/#\/settings\/skills$/)
+  await expect(page.getByRole('heading', { name: 'Skills', exact: true })).toBeVisible()
+  await settings.getByRole('button', { name: /模型与系统/ }).click()
+  await expect(page).toHaveURL(/#\/settings\/models$/)
   await expect(page.getByRole('heading', { name: '模型与系统', exact: true })).toBeVisible()
+  await settings.getByRole('button', { name: /提示词模板/ }).click()
+  await expect(page).toHaveURL(/#\/settings\/prompts$/)
+  await expect(page.getByRole('heading', { name: '提示词模板', exact: true })).toBeVisible()
+
+  await settings.getByRole('button', { name: /数字人工作台/ }).click()
+  await expect(page).toHaveURL(/#\/settings\/digital-human$/)
+  await expect(page.getByRole('heading', { name: '数字人工作台', exact: true })).toBeVisible()
+  await expect(page.getByRole('img', { name: /小禾/ })).toBeVisible()
+  await expect(page.locator('.digital-avatar')).toHaveClass(/animated/)
+  await expect(page.locator('.digital-avatar .eye')).toHaveCount(2)
+  await page.getByRole('button', { name: '暂停动态' }).click()
+  await expect(page.locator('.digital-avatar')).not.toHaveClass(/animated/)
+
+  await page.getByRole('button', { name: /内容生成/ }).first().click()
+  await expect(page).toHaveURL(/#\/artifacts$/)
+  await expect(page.getByRole('heading', { name: '内容生成', exact: true })).toBeVisible()
+
+  await page.getByRole('button', { name: /运行监测/ }).first().click()
+  await expect(page).toHaveURL(/#\/operations$/)
+  await expect(page.getByRole('heading', { name: '运行监测', exact: true })).toBeVisible()
 })
 
 test('recovers a terminal event that races with the active-run lookup', async ({ page }) => {

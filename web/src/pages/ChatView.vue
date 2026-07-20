@@ -1,12 +1,13 @@
 <script setup lang="ts">
-import { computed, nextTick, onActivated, onBeforeUnmount, onMounted, reactive, ref } from 'vue'
+import { computed, nextTick, onActivated, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { formatApiError, jsonBody, listOf, openRunEventStream, request } from '../api'
 import AppIcon from '../components/AppIcon.vue'
 import EmptyState from '../components/EmptyState.vue'
 import ModalDialog from '../components/ModalDialog.vue'
 import StatusBadge from '../components/StatusBadge.vue'
 import { notify } from '../notifications'
-import type { AgentConfig, Approval, ChatMessage, Citation, RunEvent, RunResponse, SessionItem } from '../types'
+import { navigateTo } from '../navigation'
+import type { AgentConfig, Approval, ArtifactItem, ChatMessage, Citation, Project, RunEvent, RunResponse, SessionItem } from '../types'
 
 interface SessionDetail extends SessionItem { messages: ChatMessage[] }
 interface RunRecord {
@@ -21,6 +22,8 @@ interface ApprovalRecord extends Approval { status: string }
 
 const sessions = ref<SessionItem[]>([])
 const agents = ref<AgentConfig[]>([])
+const projects = ref<Project[]>([])
+const projectFilter = ref('all')
 const selectedId = ref('')
 const messages = ref<ChatMessage[]>([])
 const loading = ref(true)
@@ -33,6 +36,7 @@ const runStatus = ref('idle')
 const streamState = ref<'idle' | 'connecting' | 'open' | 'reconnecting'>('idle')
 const events = ref<RunEvent[]>([])
 const currentCitations = ref<Citation[]>([])
+const currentArtifacts = ref<ArtifactItem[]>([])
 const approval = ref<Approval | null>(null)
 const decidingApproval = ref(false)
 const createOpen = ref(false)
@@ -47,10 +51,23 @@ const selected = computed(() => sessions.value.find((item) => item.id === select
 const selectedAgent = computed(() => agents.value.find((item) => item.id === selected.value?.agent_id) ?? null)
 const canSend = computed(() => Boolean(selectedId.value && prompt.value.trim() && !running.value))
 const timelineEmpty = computed(() => events.value.length === 0)
+const filteredAgents = computed(() => projectFilter.value === 'all' ? agents.value : agents.value.filter((item) => item.project_id === projectFilter.value))
+const filteredSessions = computed(() => projectFilter.value === 'all' ? sessions.value : sessions.value.filter((item) => filteredAgents.value.some((agent) => agent.id === item.agent_id)))
+
+watch(projectFilter, () => {
+  if (running.value) return
+  createForm.agent_id = filteredAgents.value[0]?.id ?? ''
+  if (!filteredSessions.value.some((item) => item.id === selectedId.value)) {
+    selectedId.value = filteredSessions.value[0]?.id ?? ''
+    messages.value = []
+    if (selectedId.value) void loadSession(selectedId.value)
+  }
+})
 
 const nodeLabels: Record<string, string> = {
-  load_session: '加载会话', retrieve: '知识检索', model_decision: '模型推理', tool_loop: '工具循环',
-  resume_approval: '恢复审批', finalize: '整理引用', persist: '持久化', pause: '等待审批',
+  load_session: '加载会话', retrieve: '知识检索', draft_plan: '生成实施方案', review_plan: '方案 Review',
+  model_decision: '模型推理', tool_loop: '工具循环', resume_approval: '恢复工具审批',
+  resume_plan_review: '恢复方案审批', finalize: '整理引用', persist: '持久化', pause: '等待审批',
 }
 
 function agentName(id?: string | null): string {
@@ -66,6 +83,12 @@ function relativeDate(value?: string): string {
   return new Intl.DateTimeFormat('zh-CN', { month: 'short', day: 'numeric' }).format(new Date(value))
 }
 
+function bytes(value = 0): string {
+  if (value < 1024) return `${value} B`
+  if (value < 1024 * 1024) return `${(value / 1024).toFixed(1)} KB`
+  return `${(value / 1024 / 1024).toFixed(1)} MB`
+}
+
 function eventTitle(event: RunEvent): string {
   const data = event.data
   if (event.type === 'node_started') return `${nodeLabels[String(data.node)] ?? data.node ?? '节点'}开始`
@@ -75,6 +98,11 @@ function eventTitle(event: RunEvent): string {
   if (event.type === 'tool_call') return `调用 ${data.tool ?? '工具'}`
   if (event.type === 'tool_result') return `${data.tool ?? '工具'} 返回结果`
   if (event.type === 'approval_required') return '工具等待审批'
+  if (event.type === 'plan_drafted') return '实施方案已生成'
+  if (event.type === 'plan_reviewed') return `方案 Review：${data.decision === 'pass' ? '通过' : '需调整'}`
+  if (event.type === 'plan_review_required') return '实施方案等待人工审批'
+  if (event.type === 'plan_approved') return '实施方案已批准'
+  if (event.type === 'plan_rejected') return '实施方案已拒绝'
   if (event.type === 'citation') return `引用 ${data.filename ?? '知识库文档'}`
   if (event.type === 'completed') return '运行完成'
   if (event.type === 'failed') return `运行失败：${data.code ?? 'ERROR'}`
@@ -86,7 +114,7 @@ function eventTitle(event: RunEvent): string {
 function eventTone(event: RunEvent): string {
   if (['failed', 'mcp_error'].includes(event.type)) return 'error'
   if (['completed'].includes(event.type)) return 'success'
-  if (['approval_required'].includes(event.type)) return 'approval'
+  if (['approval_required', 'plan_review_required'].includes(event.type)) return 'approval'
   if (['model_delta'].includes(event.type)) return 'stream'
   return 'normal'
 }
@@ -95,12 +123,14 @@ async function load(): Promise<void> {
   loading.value = true
   loadError.value = ''
   try {
-    const [sessionData, agentData] = await Promise.all([
+    const [sessionData, agentData, projectData] = await Promise.all([
       request<SessionItem[] | { items: SessionItem[] }>('/sessions'),
       request<AgentConfig[] | { items: AgentConfig[] }>('/agents'),
+      request<Project[]>('/projects'),
     ])
     sessions.value = listOf(sessionData)
-    agents.value = listOf(agentData).filter((item) => item.enabled !== false)
+    agents.value = listOf(agentData).filter((item) => item.enabled !== false && item.agent_type !== 'digital_human')
+    projects.value = listOf(projectData)
     if (!sessions.value.some((item) => item.id === selectedId.value)) selectedId.value = sessions.value[0]?.id ?? ''
     if (selectedId.value) await loadSession(selectedId.value)
   } catch (error) {
@@ -120,6 +150,7 @@ async function loadSession(id: string): Promise<void> {
   sessionLoading.value = true
   events.value = []
   currentCitations.value = []
+  currentArtifacts.value = []
   approval.value = null
   try {
     const detail = await request<SessionDetail>(`/sessions/${id}`)
@@ -195,11 +226,11 @@ async function recoverActiveRun(sessionId: string): Promise<void> {
 
 function openCreate(): void {
   if (!agents.value.length) {
-    window.location.hash = '/agents'
+    navigateTo('agents')
     notify('请先创建一个可运行的智能体', 'info')
     return
   }
-  Object.assign(createForm, { title: '新对话', agent_id: agents.value[0]?.id ?? '' })
+  Object.assign(createForm, { title: '新对话', agent_id: filteredAgents.value[0]?.id ?? '' })
   createOpen.value = true
 }
 
@@ -260,10 +291,23 @@ function handleRunEvent(event: RunEvent): void {
     for (const item of data.items) addCitation(item as unknown as Citation)
   }
   if (event.type === 'citation') addCitation(data as unknown as Citation)
+  if (event.type === 'artifact_created') {
+    const artifactId = String(data.artifact_id ?? '')
+    if (artifactId && !currentArtifacts.value.some((item) => item.id === artifactId)) {
+      currentArtifacts.value.push({ ...(data as unknown as ArtifactItem), id: artifactId })
+    }
+  }
   if (event.type === 'approval_required') {
     approval.value = {
-      id: String(data.approval_id), tool_name: String(data.tool),
+      id: String(data.approval_id), kind: 'tool_approval', tool_name: String(data.tool),
       arguments: (data.arguments ?? {}) as Record<string, unknown>, risk: String(data.risk ?? 'write'),
+    }
+    runStatus.value = 'waiting_approval'
+  }
+  if (event.type === 'plan_review_required') {
+    approval.value = {
+      id: String(data.approval_id), kind: 'plan_review', tool_name: 'builtin.plan_review',
+      arguments: { plan: data.plan, review: data.review }, risk: 'review',
     }
     runStatus.value = 'waiting_approval'
   }
@@ -312,6 +356,7 @@ async function send(): Promise<void> {
   messages.value.push({ id: assistantDraftId.value, role: 'assistant', content: '', created_at: now, citations: [] })
   events.value = []
   currentCitations.value = []
+  currentArtifacts.value = []
   approval.value = null
   running.value = true
   runStatus.value = 'queued'
@@ -340,6 +385,7 @@ async function cancelRun(): Promise<void> {
 
 async function decide(decision: 'approve' | 'reject'): Promise<void> {
   if (!approval.value || !runId.value) return
+  const planReview = approval.value.kind === 'plan_review'
   decidingApproval.value = true
   try {
     await request(`/runs/${runId.value}/approvals/${approval.value.id}`, {
@@ -347,7 +393,10 @@ async function decide(decision: 'approve' | 'reject'): Promise<void> {
     })
     approval.value = null
     runStatus.value = 'running'
-    notify(decision === 'approve' ? '已批准，运行继续' : '已拒绝，模型将尝试替代方案', decision === 'approve' ? 'success' : 'info')
+    notify(
+      decision === 'approve' ? (planReview ? '方案已批准，开始生成代码' : '已批准，运行继续') : (planReview ? '方案已拒绝，不会生成或修改代码' : '已拒绝，模型将尝试替代方案'),
+      decision === 'approve' ? 'success' : 'info',
+    )
   } catch (error) { notify(formatApiError(error), 'error') }
   finally { decidingApproval.value = false }
 }
@@ -378,6 +427,7 @@ onBeforeUnmount(() => source?.close())
           <h1>对话与运行</h1>
         </div>
         <div class="chat-header-actions">
+          <select v-model="projectFilter" class="select compact-select"><option value="all">全部项目</option><option v-for="project in projects" :key="project.id" :value="project.id">{{ project.name }}</option></select>
           <span v-if="running" class="stream-pill"><i />{{ streamState === 'reconnecting' ? '正在重连事件流' : runStatus === 'waiting_approval' ? '等待审批' : '运行中' }}</span>
           <button class="button" type="button" @click="openCreate"><AppIcon name="plus" :size="16" />新对话</button>
         </div>
@@ -387,10 +437,10 @@ onBeforeUnmount(() => source?.close())
       <EmptyState v-else-if="loadError" icon="alert" title="无法打开对话工作台" :description="loadError"><button class="button secondary" type="button" @click="load">重新连接</button></EmptyState>
       <div v-else class="chat-layout">
         <aside class="conversation-list panel">
-          <div class="conversation-head"><span>最近会话</span><strong>{{ sessions.length }}</strong></div>
-          <div v-if="sessions.length" class="conversation-scroll">
+          <div class="conversation-head"><span>最近会话</span><strong>{{ filteredSessions.length }}</strong></div>
+          <div v-if="filteredSessions.length" class="conversation-scroll">
             <div
-              v-for="session in sessions"
+              v-for="session in filteredSessions"
               :key="session.id"
               class="conversation"
               :class="{ active: selectedId === session.id }"
@@ -440,12 +490,19 @@ onBeforeUnmount(() => source?.close())
                   </div>
                 </div>
               </article>
+              <section v-if="currentArtifacts.length" class="artifact-list">
+                <a v-for="artifact in currentArtifacts" :key="artifact.id" :href="artifact.download_url || `/api/v1/artifacts/${artifact.id}/download`" class="artifact-card" download>
+                  <span><AppIcon :name="artifact.kind === 'image' ? 'sparkles' : 'file'" :size="18" /></span>
+                  <div><strong>{{ artifact.filename }}</strong><small>{{ artifact.kind === 'presentation' ? '演示文稿' : artifact.kind === 'image' ? '生成图片' : '生成报告' }} · {{ bytes(artifact.size_bytes) }}</small></div>
+                  <AppIcon name="download" :size="16" />
+                </a>
+              </section>
             </div>
 
             <div v-if="approval" class="approval-bar">
               <span class="approval-icon"><AppIcon name="alert" :size="19" /></span>
-              <div><strong>工具请求{{ approval.risk === 'execute' ? '执行' : '写入' }}权限</strong><code>{{ approval.tool_name }}</code><p>{{ JSON.stringify(approval.arguments, null, 2) }}</p></div>
-              <div class="approval-actions"><button class="button danger small" type="button" :disabled="decidingApproval" @click="decide('reject')">拒绝</button><button class="button small" type="button" :disabled="decidingApproval" @click="decide('approve')">批准一次</button></div>
+              <div><strong>{{ approval.kind === 'plan_review' ? '实施方案需要人工 Review' : `工具请求${approval.risk === 'execute' ? '执行' : '写入'}权限` }}</strong><code>{{ approval.tool_name }}</code><p>{{ JSON.stringify(approval.arguments, null, 2) }}</p></div>
+              <div class="approval-actions"><button class="button danger small" type="button" :disabled="decidingApproval" @click="decide('reject')">{{ approval.kind === 'plan_review' ? '退回方案' : '拒绝' }}</button><button class="button small" type="button" :disabled="decidingApproval" @click="decide('approve')">{{ approval.kind === 'plan_review' ? '批准实施' : '批准一次' }}</button></div>
             </div>
 
             <footer class="composer-wrap">
@@ -480,7 +537,7 @@ onBeforeUnmount(() => source?.close())
     <ModalDialog :open="createOpen" title="开始新对话" description="选择智能体后，会话会一直绑定该配置入口" @close="createOpen = false">
       <form class="form-grid" @submit.prevent="createSession">
         <div class="field full"><label for="session-title">会话名称</label><input id="session-title" v-model="createForm.title" class="input" maxlength="200" /></div>
-        <div class="field full"><label for="session-agent">智能体</label><select id="session-agent" v-model="createForm.agent_id" class="select"><option v-for="agent in agents" :key="agent.id" :value="agent.id">{{ agent.name }} · {{ agent.description || '无说明' }}</option></select></div>
+        <div class="field full"><label for="session-agent">智能体</label><select id="session-agent" v-model="createForm.agent_id" class="select"><option v-for="agent in filteredAgents" :key="agent.id" :value="agent.id">{{ agent.name }} · {{ agent.description || '无说明' }}</option></select></div>
       </form>
       <template #footer><button class="button secondary" type="button" @click="createOpen = false">取消</button><button class="button" type="button" :disabled="creating || !createForm.agent_id" @click="createSession">{{ creating ? '创建中…' : '创建会话' }}</button></template>
     </ModalDialog>
@@ -497,6 +554,12 @@ onBeforeUnmount(() => source?.close())
 .stream-pill { display: inline-flex; align-items: center; gap: 6px; color: var(--green); font-size: 9px; }
 .stream-pill i { width: 6px; height: 6px; background: #54b17e; border-radius: 50%; box-shadow: 0 0 0 4px rgba(84,177,126,.12); animation: pulse 1.3s infinite; }
 .chat-layout { display: grid; min-height: 0; flex: 1; grid-template-columns: 205px minmax(380px,1fr) 245px; gap: 11px; }
+.artifact-list { display: grid; gap: 8px; margin: 8px 45px 18px; }
+.artifact-card { display: flex; align-items: center; gap: 10px; padding: 11px 13px; color: inherit; background: var(--green-soft); border: 1px solid rgba(35,93,70,.14); border-radius: 12px; text-decoration: none; }
+.artifact-card > span { display: grid; width: 34px; height: 34px; place-items: center; color: var(--green); background: white; border-radius: 9px; }
+.artifact-card > div { display: flex; min-width: 0; flex: 1; flex-direction: column; }
+.artifact-card strong { overflow: hidden; font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
+.artifact-card small { margin-top: 3px; color: var(--muted); font-size: 8px; }
 .conversation-list, .chat-panel, .timeline { min-height: 0; overflow: hidden; }
 .conversation-list { display: flex; flex-direction: column; padding: 7px; }
 .conversation-head { display: flex; align-items: center; justify-content: space-between; padding: 10px 8px; color: var(--muted); font-size: 9px; }

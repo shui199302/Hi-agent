@@ -22,7 +22,7 @@ services:
       - --served-model-name
       - "${VLLM_SERVED_MODEL_NAME:-${VLLM_MODEL:-__SET_VLLM_MODEL__}}"
       - --api-key
-      - "${VLLM_API_KEY:-local-dev-token}"
+      - "${VLLM_API_KEY:?Set VLLM_API_KEY in deploy/vllm.env}"
       - --tensor-parallel-size
       - "${VLLM_TENSOR_PARALLEL_SIZE:-1}"
       - --max-model-len

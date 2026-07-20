@@ -79,11 +79,13 @@ async function save(): Promise<void> {
     command: form.transport === 'stdio' ? form.command.trim() : null,
     args: form.transport === 'stdio' ? form.argsText.split('\n').map((value) => value.trim()).filter(Boolean) : [],
     url: form.transport === 'streamable_http' ? form.url.trim() : null,
-    env_refs: {},
     enabled: form.enabled,
     allow_remote: form.allow_remote,
   }
-  if (!editingId.value) payload.transport = form.transport
+  if (!editingId.value) {
+    payload.transport = form.transport
+    payload.env_refs = {}
+  }
   try {
     await request<McpServerConfig>(editingId.value ? `/mcp/servers/${editingId.value}` : '/mcp/servers', {
       method: editingId.value ? 'PATCH' : 'POST',
@@ -127,6 +129,7 @@ async function probe(server: McpServerConfig): Promise<void> {
 }
 
 async function remove(server: McpServerConfig): Promise<void> {
+  if (server.builtin) return
   if (!window.confirm(`确认删除 MCP 服务“${server.name}”？`)) return
   try {
     await request<void>(`/mcp/servers/${server.id}`, { method: 'DELETE' })
@@ -139,6 +142,13 @@ async function remove(server: McpServerConfig): Promise<void> {
 
 function riskLabel(risk?: string): string {
   return ({ read: '只读', network: '联网', write: '写入', execute: '执行' } as Record<string, string>)[risk ?? 'read'] ?? risk ?? '只读'
+}
+
+function displayStatus(server: McpServerConfig): string {
+  const probed = probeResults[server.id]?.status
+  if (probed) return probed
+  if (!server.enabled) return 'disabled'
+  return server.status && !['unknown', 'disabled'].includes(server.status) ? server.status : 'enabled'
 }
 
 onMounted(load)
@@ -177,9 +187,11 @@ onActivated(() => { if (!loading.value) void load() })
           <div class="server-main">
             <div class="server-icon"><AppIcon name="plug" :size="21" /></div>
             <div class="server-copy">
-              <div class="server-title"><h2>{{ server.name }}</h2><StatusBadge :status="probeResults[server.id]?.status || server.status || (server.enabled ? 'enabled' : 'disabled')" /></div>
+              <div class="server-title"><h2>{{ server.name }}</h2><span v-if="server.builtin" class="preset-badge">官方预置</span><StatusBadge :status="displayStatus(server)" /></div>
+              <p v-if="server.description" class="server-description">{{ server.description }}</p>
               <code>{{ server.transport === 'stdio' ? [server.command, ...(server.args ?? [])].filter(Boolean).join(' ') : server.url }}</code>
               <div class="server-tags"><span>{{ server.transport === 'stdio' ? 'STDIO' : 'STREAMABLE HTTP' }}</span><span v-if="server.allow_remote">REMOTE ALLOWED</span><span v-else>LOCAL ONLY</span></div>
+              <p v-if="server.setup_hint" class="setup-hint">{{ server.setup_hint }} <a v-if="server.source_url" :href="server.source_url" target="_blank" rel="noreferrer">查看来源</a></p>
             </div>
             <div class="server-actions">
               <button class="button secondary small" type="button" :disabled="probingId === server.id" @click="probe(server)">
@@ -188,7 +200,7 @@ onActivated(() => { if (!loading.value) void load() })
               </button>
               <button class="switch" :class="{ on: server.enabled }" type="button" :aria-label="server.enabled ? '停用服务' : '启用服务'" :aria-pressed="server.enabled" @click="toggle(server)" />
               <button class="icon-button" type="button" aria-label="编辑服务" @click="openEdit(server)"><AppIcon name="edit" :size="16" /></button>
-              <button class="icon-button remove" type="button" aria-label="删除服务" @click="remove(server)"><AppIcon name="trash" :size="16" /></button>
+              <button v-if="!server.builtin" class="icon-button remove" type="button" aria-label="删除服务" @click="remove(server)"><AppIcon name="trash" :size="16" /></button>
             </div>
           </div>
 
@@ -209,7 +221,7 @@ onActivated(() => { if (!loading.value) void load() })
 
     <ModalDialog :open="modalOpen" :title="editingId ? '编辑 MCP 服务' : '添加 MCP 服务'" :description="transportHint" @close="modalOpen = false">
       <form class="form-grid" @submit.prevent="save">
-        <div class="field full"><label for="mcp-name">服务名称</label><input id="mcp-name" v-model="form.name" class="input" maxlength="120" placeholder="例如：workspace" /></div>
+        <div class="field full"><label for="mcp-name">服务名称</label><input id="mcp-name" v-model="form.name" class="input" maxlength="32" :disabled="Boolean(editingId && servers.find((item) => item.id === editingId)?.builtin)" placeholder="例如：workspace" /></div>
         <div class="field full">
           <span class="field-label">传输方式</span>
           <div class="segment-control">
@@ -247,9 +259,13 @@ onActivated(() => { if (!loading.value) void load() })
 .server-copy { min-width: 0; flex: 1; }
 .server-title { display: flex; align-items: center; gap: 9px; }
 .server-title h2 { margin: 0; font-size: 13px; }
+.preset-badge { padding: 3px 6px; color: var(--blue); font-size: 7px; background: var(--blue-soft); border-radius: 5px; }
+.server-description { margin: 4px 0 0; color: var(--muted); font-size: 9px; }
 .server-copy code { display: block; max-width: 640px; margin-top: 5px; overflow: hidden; color: var(--muted); font-family: 'DM Mono', monospace; font-size: 8px; text-overflow: ellipsis; white-space: nowrap; }
 .server-tags { display: flex; gap: 5px; margin-top: 8px; }
 .server-tags span { padding: 3px 6px; color: #6d776e; font-family: 'DM Mono', monospace; font-size: 6px; letter-spacing: .07em; background: #f1f3ee; border-radius: 5px; }
+.setup-hint { max-width: 760px; margin: 7px 0 0; color: var(--faint); font-size: 8px; line-height: 1.5; }
+.setup-hint a { color: var(--blue); }
 .server-actions { display: flex; align-items: center; gap: 5px; }
 .server-actions .remove:hover { color: var(--red); background: var(--red-soft); }
 .mini-spinner { width: 12px; height: 12px; border: 1.5px solid #ccd7cf; border-top-color: var(--green); border-radius: 50%; animation: spin .7s linear infinite; }

@@ -2,26 +2,27 @@
 import { computed, defineAsyncComponent, onBeforeUnmount, onMounted, ref } from 'vue'
 import { request } from './api'
 import AppIcon from './components/AppIcon.vue'
+import { hashSegments, isSettingsSection, navigateTo } from './navigation'
 import { dismissNotice, notificationState } from './notifications'
 import type { SystemStatus, UserProfile } from './types'
 
 const ChatView = defineAsyncComponent(() => import('./pages/ChatView.vue'))
+const ProjectsView = defineAsyncComponent(() => import('./pages/ProjectsView.vue'))
+const ArtifactsView = defineAsyncComponent(() => import('./pages/ArtifactsView.vue'))
 const AgentsView = defineAsyncComponent(() => import('./pages/AgentsView.vue'))
 const KnowledgeView = defineAsyncComponent(() => import('./pages/KnowledgeView.vue'))
-const McpView = defineAsyncComponent(() => import('./pages/McpView.vue'))
-const SkillsView = defineAsyncComponent(() => import('./pages/SkillsView.vue'))
-const ModelsView = defineAsyncComponent(() => import('./pages/ModelsView.vue'))
 const OperationsView = defineAsyncComponent(() => import('./pages/OperationsView.vue'))
+const SettingsView = defineAsyncComponent(() => import('./pages/SettingsView.vue'))
 const LoginView = defineAsyncComponent(() => import('./pages/LoginView.vue'))
 
 const navigation = [
   { id: 'chat', label: '对话', hint: '运行智能体', icon: 'chat', component: ChatView },
+  { id: 'projects', label: '项目', hint: '资源与运行空间', icon: 'file', component: ProjectsView },
   { id: 'agents', label: '智能体', hint: '提示词与能力', icon: 'agents', component: AgentsView },
   { id: 'knowledge', label: '知识库', hint: '文档与检索', icon: 'database', component: KnowledgeView },
-  { id: 'mcp', label: 'MCP', hint: '服务与工具', icon: 'plug', component: McpView },
-  { id: 'skills', label: 'Skills', hint: '技能目录', icon: 'sparkles', component: SkillsView },
-  { id: 'models', label: '模型与系统', hint: '端点与状态', icon: 'server', component: ModelsView },
-  { id: 'operations', label: '运行与质量', hint: 'Trace 与评测', icon: 'activity', component: OperationsView },
+  { id: 'artifacts', label: '内容生成', hint: '图片、报告与演示', icon: 'sparkles', component: ArtifactsView },
+  { id: 'operations', label: '运行监测', hint: 'Run Trace 与质量', icon: 'activity', component: OperationsView },
+  { id: 'settings', label: '设置', hint: '模型、工具与工作台', icon: 'settings', component: SettingsView },
 ] as const
 
 const active = ref('chat')
@@ -35,13 +36,14 @@ const user = ref<UserProfile | null>(null)
 const current = computed(() => navigation.find((item) => item.id === active.value) ?? navigation[0])
 
 function syncHash(): void {
-  const id = window.location.hash.replace('#/', '').replace('#', '').split('/')[0]
-  if (navigation.some((item) => item.id === id)) active.value = id
+  const id = hashSegments()[0] ?? ''
+  const normalized = isSettingsSection(id) ? 'settings' : id
+  if (navigation.some((item) => item.id === normalized)) active.value = normalized
 }
 
 function navigate(id: string): void {
   active.value = id
-  window.location.hash = `/${id}`
+  navigateTo(id)
   mobileNavOpen.value = false
 }
 

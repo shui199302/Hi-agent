@@ -80,6 +80,23 @@ export async function request<T>(path: string, init: RequestInit = {}): Promise<
   return payload as T
 }
 
+export async function download(path: string, init: RequestInit = {}): Promise<{ blob: Blob; filename: string }> {
+  const headers = new Headers(init.headers)
+  headers.set('Accept', '*/*')
+  if (init.body && !(init.body instanceof FormData) && !headers.has('Content-Type')) headers.set('Content-Type', 'application/json')
+  const csrf = document.cookie.split('; ').find((item) => item.startsWith('hi_agent_csrf='))?.split('=')[1]
+  if (csrf) headers.set('X-CSRF-Token', decodeURIComponent(csrf))
+  const response = await fetch(`${API_BASE}${path}`, { ...init, headers, credentials: 'same-origin' })
+  if (!response.ok) {
+    const payload = response.headers.get('content-type')?.includes('application/json') ? await response.json() : await response.text()
+    const parsed = errorMessage(payload, `下载失败（HTTP ${response.status}）`)
+    throw new ApiError(parsed.message, response.status, parsed.code, payload)
+  }
+  const disposition = response.headers.get('content-disposition') ?? ''
+  const filename = disposition.match(/filename="([^"]+)"/)?.[1] ?? 'download'
+  return { blob: await response.blob(), filename }
+}
+
 export function jsonBody(value: unknown): Pick<RequestInit, 'body'> {
   return { body: JSON.stringify(value) }
 }

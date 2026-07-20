@@ -132,18 +132,69 @@ class ModelEndpoint(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now_utc, onupdate=now_utc)
 
 
+class ImageEndpoint(Base):
+    __tablename__ = "image_endpoints"
+    __table_args__ = (UniqueConstraint("owner_id", "name", name="uq_image_endpoint_owner_name"),)
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    owner_id: Mapped[str] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    name: Mapped[str] = mapped_column(String(120))
+    base_url: Mapped[str] = mapped_column(String(500))
+    model: Mapped[str] = mapped_column(String(250))
+    api_key_env: Mapped[str] = mapped_column(String(120))
+    timeout_seconds: Mapped[float] = mapped_column(Float, default=180.0)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now_utc)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now_utc, onupdate=now_utc)
+
+
+class Project(Base):
+    __tablename__ = "projects"
+    __table_args__ = (UniqueConstraint("owner_id", "name", name="uq_project_owner_name"),)
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    owner_id: Mapped[str] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    name: Mapped[str] = mapped_column(String(120))
+    description: Mapped[str] = mapped_column(Text, default="")
+    status: Mapped[str] = mapped_column(String(30), default="active", index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now_utc)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now_utc, onupdate=now_utc)
+
+
+class PromptTemplate(Base):
+    __tablename__ = "prompt_templates"
+    __table_args__ = (UniqueConstraint("owner_id", "name", name="uq_prompt_template_owner_name"),)
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    owner_id: Mapped[str] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    name: Mapped[str] = mapped_column(String(120))
+    description: Mapped[str] = mapped_column(Text, default="")
+    category: Mapped[str] = mapped_column(String(40), default="custom", index=True)
+    content: Mapped[str] = mapped_column(Text)
+    variables: Mapped[list[str]] = mapped_column(JSON, default=list)
+    tags: Mapped[list[str]] = mapped_column(JSON, default=list)
+    builtin: Mapped[bool] = mapped_column(Boolean, default=False)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now_utc)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now_utc, onupdate=now_utc)
+
+
 class KnowledgeBase(Base):
     __tablename__ = "knowledge_bases"
     __table_args__ = (UniqueConstraint("owner_id", "name", name="uq_kb_owner_name"),)
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
     owner_id: Mapped[str] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    project_id: Mapped[str] = mapped_column(ForeignKey("projects.id", ondelete="RESTRICT"), index=True)
     name: Mapped[str] = mapped_column(String(120))
     description: Mapped[str] = mapped_column(Text, default="")
     embedding_model: Mapped[str] = mapped_column(String(250), default="BAAI/bge-small-zh-v1.5")
     chunk_size: Mapped[int] = mapped_column(Integer, default=800)
     chunk_overlap: Mapped[int] = mapped_column(Integer, default=120)
     top_k: Mapped[int] = mapped_column(Integer, default=5)
+    ocr_mode: Mapped[str] = mapped_column(String(20), default="auto")
+    ocr_language: Mapped[str] = mapped_column(String(20), default="ch")
+    ocr_min_chars: Mapped[int] = mapped_column(Integer, default=30)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now_utc)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now_utc, onupdate=now_utc)
 
@@ -164,6 +215,9 @@ class Document(Base):
     status: Mapped[str] = mapped_column(String(30), default="processing")
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
     chunk_count: Mapped[int] = mapped_column(Integer, default=0)
+    extraction_method: Mapped[str] = mapped_column(String(20), default="text")
+    ocr_pages: Mapped[list[int]] = mapped_column(JSON, default=list)
+    ocr_engine: Mapped[str | None] = mapped_column(String(80), nullable=True)
     storage_path: Mapped[str] = mapped_column(String(800))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now_utc)
 
@@ -192,6 +246,10 @@ class McpServerConfig(Base):
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
     owner_id: Mapped[str] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
     name: Mapped[str] = mapped_column(String(120))
+    description: Mapped[str] = mapped_column(Text, default="")
+    source_url: Mapped[str | None] = mapped_column(String(1000), nullable=True)
+    setup_hint: Mapped[str] = mapped_column(Text, default="")
+    builtin: Mapped[bool] = mapped_column(Boolean, default=False)
     transport: Mapped[str] = mapped_column(String(30))
     command: Mapped[str | None] = mapped_column(String(500), nullable=True)
     args: Mapped[list[str]] = mapped_column(JSON, default=list)
@@ -211,6 +269,7 @@ class AgentConfig(Base):
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
     owner_id: Mapped[str] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    project_id: Mapped[str] = mapped_column(ForeignKey("projects.id", ondelete="RESTRICT"), index=True)
     name: Mapped[str] = mapped_column(String(120))
     description: Mapped[str] = mapped_column(Text, default="")
     system_prompt: Mapped[str] = mapped_column(Text, default="你是一个可靠的中文智能体助手。")
@@ -224,6 +283,13 @@ class AgentConfig(Base):
     mcp_servers: Mapped[list[str]] = mapped_column(JSON, default=list)
     tool_policy: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
     max_tool_loops: Mapped[int] = mapped_column(Integer, default=12)
+    review_policy: Mapped[str] = mapped_column(String(20), default="risk_based")
+    review_model_endpoint_id: Mapped[str | None] = mapped_column(
+        ForeignKey("model_endpoints.id", ondelete="SET NULL"), nullable=True
+    )
+    review_max_rounds: Mapped[int] = mapped_column(Integer, default=2)
+    agent_type: Mapped[str] = mapped_column(String(30), default="general", index=True)
+    builtin: Mapped[bool] = mapped_column(Boolean, default=False)
     enabled: Mapped[bool] = mapped_column(Boolean, default=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now_utc)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now_utc, onupdate=now_utc)
@@ -246,6 +312,7 @@ class ChatSession(Base):
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
     owner_id: Mapped[str] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    project_id: Mapped[str] = mapped_column(ForeignKey("projects.id", ondelete="RESTRICT"), index=True)
     title: Mapped[str] = mapped_column(String(200), default="新对话")
     agent_id: Mapped[str] = mapped_column(ForeignKey("agents.id", ondelete="RESTRICT"), index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now_utc)
@@ -286,6 +353,7 @@ class Run(Base):
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
     owner_id: Mapped[str] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    project_id: Mapped[str] = mapped_column(ForeignKey("projects.id", ondelete="RESTRICT"), index=True)
     session_id: Mapped[str] = mapped_column(ForeignKey("sessions.id", ondelete="CASCADE"), index=True)
     agent_id: Mapped[str] = mapped_column(String(36))
     status: Mapped[str] = mapped_column(String(30), default=RunStatus.queued.value)
@@ -302,6 +370,25 @@ class Run(Base):
     session: Mapped[ChatSession] = relationship(back_populates="runs")
     events: Mapped[list[RunEvent]] = relationship(back_populates="run", cascade="all, delete-orphan")
     approvals: Mapped[list[Approval]] = relationship(back_populates="run", cascade="all, delete-orphan")
+
+
+class Artifact(Base):
+    __tablename__ = "artifacts"
+    __table_args__ = (Index("ix_artifacts_run_created", "run_id", "created_at"),)
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    owner_id: Mapped[str] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    project_id: Mapped[str] = mapped_column(ForeignKey("projects.id", ondelete="RESTRICT"), index=True)
+    run_id: Mapped[str | None] = mapped_column(ForeignKey("runs.id", ondelete="SET NULL"), nullable=True, index=True)
+    kind: Mapped[str] = mapped_column(String(30), index=True)
+    filename: Mapped[str] = mapped_column(String(255))
+    media_type: Mapped[str] = mapped_column(String(120))
+    size_bytes: Mapped[int] = mapped_column(Integer)
+    sha256: Mapped[str] = mapped_column(String(64))
+    storage_path: Mapped[str] = mapped_column(String(800))
+    status: Mapped[str] = mapped_column(String(30), default="ready")
+    metadata_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now_utc)
 
 
 class RunEvent(Base):
@@ -322,6 +409,7 @@ class Approval(Base):
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
     run_id: Mapped[str] = mapped_column(ForeignKey("runs.id", ondelete="CASCADE"), index=True)
+    kind: Mapped[str] = mapped_column(String(30), default="tool_approval")
     tool_name: Mapped[str] = mapped_column(String(300))
     arguments: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
     risk: Mapped[str] = mapped_column(String(30))

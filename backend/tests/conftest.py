@@ -32,11 +32,7 @@ def settings(tmp_path: Path) -> Settings:
     script_dir = data_skill / "scripts"
     script_dir.mkdir(parents=True)
     (data_skill / "SKILL.md").write_text(
-        "---\n"
-        "name: data-analysis\n"
-        "description: 安全分析 CSV 或 TSV 文件。\n"
-        "---\n"
-        "# 数据分析\n",
+        "---\nname: data-analysis\ndescription: 安全分析 CSV 或 TSV 文件。\n---\n# 数据分析\n",
         encoding="utf-8",
     )
     (script_dir / "profile_csv.py").write_text(
@@ -49,12 +45,14 @@ def settings(tmp_path: Path) -> Settings:
     )
     data = tmp_path / "data"
     return Settings(
+        _env_file=None,
         data_dir=data,
         database_url=f"sqlite:///{data / 'test.sqlite3'}",
         qdrant_path=data / "qdrant",
         web_dist_dir=tmp_path / "missing-web",
         skills_dir=skills,
         embedding_backend="deterministic",
+        llm_model="",
         event_poll_seconds=0.01,
         sse_heartbeat_seconds=0.05,
         run_timeout_seconds=5,

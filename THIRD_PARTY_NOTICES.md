@@ -11,7 +11,10 @@ license texts and notices remain authoritative. Exact resolved versions are reco
 | FastAPI, Pydantic, SQLAlchemy, LangGraph, MCP Python SDK, python-docx | MIT |
 | Starlette, Uvicorn, HTTPX, python-dotenv | BSD-3-Clause |
 | Qdrant Client, FastEmbed, python-multipart | Apache-2.0 |
-| pypdf | BSD-3-Clause |
+| pypdf, ReportLab | BSD-3-Clause |
+| PaddleOCR, PaddlePaddle | Apache-2.0 |
+| pypdfium2 | Apache-2.0 / BSD-3-Clause |
+| python-pptx | MIT |
 | aiosqlite | MIT |
 
 Development tooling includes Ruff (MIT), Mypy (MIT), Pytest (MIT), uv (MIT OR Apache-2.0),
@@ -28,6 +31,9 @@ Node.js and pnpm are downloaded as development/runtime tooling by the bootstrap 
 their upstream licenses and bundled notices.
 
 ## Models and deployment images
+
+- Embedded `NotoSansSC` font data is Copyright The Noto Project Authors and licensed under
+  SIL Open Font License 1.1; the full license is included in `backend/src/hi_agent/assets/OFL.txt`.
 
 - The default FastEmbed model `BAAI/bge-small-zh-v1.5` is delivered through FastEmbed's
   `Qdrant/bge-small-zh-v1.5` artifact and is identified there as MIT licensed.

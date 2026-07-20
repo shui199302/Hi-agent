@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import asyncio
+import io
 import json
 import re
+import zipfile
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
@@ -16,8 +18,10 @@ from hi_agent.database import configure_database, create_schema, initialize_tena
 from hi_agent.errors import HiAgentError
 from hi_agent.llm import OpenAICompatibleChatModel, _wire_tool_name
 from hi_agent.mcp_client import McpClient, _tool_risk
-from hi_agent.models import AgentConfig, ChatSession, McpServerConfig, Run, RunStatus
+from hi_agent.mcp_presets import workspace_mcp_executable
+from hi_agent.models import AgentConfig, ChatSession, McpServerConfig, Run, RunStatus, now_utc
 from hi_agent.rag import ParsedPage, chunk_pages, validate_filename
+from hi_agent.reports import RagReportData, render_report
 from hi_agent.runtime import RunManager
 from hi_agent.schemas import SearchHit
 from hi_agent.skills import SkillRegistry
@@ -44,6 +48,59 @@ def test_filename_and_skill_path_confinement(settings: object, tmp_path: Path) -
         registry.read_resource("task-planning", "../SKILL.md")
     with pytest.raises(HiAgentError):
         registry.get("../escape")
+
+
+def test_clawhub_zip_rejects_escape_and_scans_content(settings: object) -> None:
+    registry = SkillRegistry(settings)  # type: ignore[arg-type]
+    good = io.BytesIO()
+    with zipfile.ZipFile(good, "w") as package:
+        package.writestr(
+            "package/SKILL.md", "---\nname: safe-skill\ndescription: 安全的远程测试 Skill\n---\n\n# 使用说明\n"
+        )
+        package.writestr("package/references/guide.md", "只读参考资料")
+    payloads = registry._safe_zip_payloads(good.getvalue())
+    assert set(payloads) == {"SKILL.md", "references/guide.md"}
+
+    escaped = io.BytesIO()
+    with zipfile.ZipFile(escaped, "w") as package:
+        package.writestr("../SKILL.md", "escape")
+    with pytest.raises(HiAgentError, match="安装包无效"):
+        registry._safe_zip_payloads(escaped.getvalue())
+
+    bomb = io.BytesIO()
+    with zipfile.ZipFile(bomb, "w", compression=zipfile.ZIP_DEFLATED) as package:
+        package.writestr("package/SKILL.md", b"A" * (2 * 1024 * 1024 + 1))
+    with pytest.raises(HiAgentError, match="体积超限"):
+        registry._safe_zip_payloads(bomb.getvalue())
+
+
+def test_remote_skill_cannot_replace_builtin(settings: Settings) -> None:
+    registry = SkillRegistry(settings)
+    destination = settings.skills_dir / "data-analysis"
+    with pytest.raises(HiAgentError) as error:
+        registry._validate_remote_destination(
+            "data-analysis",
+            destination,
+            True,
+            {"source": "clawhub", "slug": "data-analysis"},
+        )
+    assert error.value.code == "SKILL_BUILTIN_PROTECTED"
+
+
+def test_markdown_report_contains_untrusted_content_as_literal_text() -> None:
+    data = RagReportData(
+        run_id="run-1",
+        knowledge_base="资料库 <img src=https://tracker.invalid/x>",
+        question="# 伪造标题\n![远程图](https://tracker.invalid/a.png)",
+        answer="```\n嵌套围栏\n```",
+        workflow=["知识检索"],
+        citations=[{"filename": "<script>alert(1)</script>.md", "chunk_index": 0}],
+        generated_at=now_utc(),
+    )
+    content, _, _ = render_report(data, "md")
+    text = content.decode()
+    assert "<img" not in text and "<script>" not in text
+    assert "```text\n# 伪造标题" in text
 
 
 def test_remote_mcp_security_defaults(settings: object) -> None:
@@ -89,6 +146,20 @@ def test_mcp_env_refs_use_dotenv_without_exposing_value(
     environment = McpClient(settings)._stdio_environment(server)
     assert environment["TOKEN"] == "dotenv-mcp-secret"
     assert "dotenv-mcp-secret" not in repr(server.__dict__)
+
+
+def test_builtin_mcp_paths_and_environment_are_cross_platform(settings: Settings) -> None:
+    assert workspace_mcp_executable(settings.project_root, windows=False).as_posix().endswith(
+        "mcp_servers/.venv/bin/hi-agent-mcp"
+    )
+    assert str(workspace_mcp_executable(settings.project_root, windows=True)).endswith(
+        "mcp_servers/.venv/Scripts/hi-agent-mcp.exe"
+    )
+    memory = McpServerConfig(name="memory", transport="stdio", command="npx", builtin=True)
+    sequential = McpServerConfig(name="sequential-thinking", transport="stdio", command="npx", builtin=True)
+    client = McpClient(settings)
+    assert client._stdio_environment(memory)["MEMORY_FILE_PATH"] == str(settings.data_dir / "mcp-memory.jsonl")
+    assert client._stdio_environment(sequential)["DISABLE_THOUGHT_LOGGING"] == "true"
 
 
 @pytest.mark.asyncio

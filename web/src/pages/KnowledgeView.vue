@@ -1,14 +1,15 @@
 <script setup lang="ts">
 import { computed, onActivated, onBeforeUnmount, onMounted, reactive, ref } from 'vue'
-import { formatApiError, jsonBody, listOf, openRunEventStream, request } from '../api'
+import { download, formatApiError, jsonBody, listOf, openRunEventStream, request } from '../api'
 import AppIcon from '../components/AppIcon.vue'
-import { buildRagMarkdown, buildSearchCsv, safeFilename } from '../downloads'
+import { buildSearchCsv, safeFilename } from '../downloads'
 import EmptyState from '../components/EmptyState.vue'
 import LoadingState from '../components/LoadingState.vue'
 import ModalDialog from '../components/ModalDialog.vue'
 import StatusBadge from '../components/StatusBadge.vue'
 import { notify } from '../notifications'
-import type { AgentConfig, Citation, DocumentItem, KnowledgeBase, PagedResult, RunEvent, RunResponse, SearchResult } from '../types'
+import { hashSegments, navigateTo } from '../navigation'
+import type { AgentConfig, Citation, DocumentItem, KnowledgeBase, PagedResult, Project, RunEvent, RunResponse, SearchResult } from '../types'
 
 type DetailTab = 'overview' | 'documents' | 'retrieval' | 'rag'
 
@@ -22,6 +23,7 @@ const loading = ref(true)
 const listLoading = ref(false)
 const loadError = ref('')
 const agents = ref<AgentConfig[]>([])
+const projects = ref<Project[]>([])
 const kbFilters = reactive({ q: '', exact: false, status: 'all', sort_by: 'updated_at', sort_order: 'desc', page: 1, limit: 10 })
 
 const documents = ref<DocumentItem[]>([])
@@ -33,9 +35,9 @@ const createOpen = ref(false)
 const editOpen = ref(false)
 const creating = ref(false)
 const saving = ref(false)
-const createForm = reactive({ name: '', description: '', embedding_model: 'BAAI/bge-small-zh-v1.5', chunk_size: 800, chunk_overlap: 120, top_k: 5 })
-const editForm = reactive({ name: '', description: '' })
-const indexForm = reactive({ embedding_model: '', chunk_size: 800, chunk_overlap: 120, top_k: 5 })
+const createForm = reactive({ project_id: '', name: '', description: '', embedding_model: 'BAAI/bge-small-zh-v1.5', chunk_size: 800, chunk_overlap: 120, top_k: 5, ocr_mode: 'auto', ocr_language: 'ch', ocr_min_chars: 30 })
+const editForm = reactive({ project_id: '', name: '', description: '' })
+const indexForm = reactive({ embedding_model: '', chunk_size: 800, chunk_overlap: 120, top_k: 5, ocr_mode: 'auto', ocr_language: 'ch', ocr_min_chars: 30 })
 const reindexing = ref(false)
 
 const uploadBusy = ref(false)
@@ -51,6 +53,9 @@ const qaAnswer = ref('')
 const qaRunning = ref(false)
 const qaEvents = ref<RunEvent[]>([])
 const qaCitations = ref<Citation[]>([])
+const qaRunId = ref('')
+const qaCompleted = ref(false)
+const reportFormat = ref<'md' | 'docx' | 'pdf'>('md')
 let qaSource: EventSource | null = null
 
 const selected = computed(() => knowledgeBases.value.find((item) => item.id === selectedId.value) ?? allKnowledgeBases.value.find((item) => item.id === selectedId.value) ?? null)
@@ -83,10 +88,11 @@ function date(value?: string): string {
 function statusLabel(status?: string): string {
   return ({ empty: '空库', ready: '可检索', processing: '处理中', error: '异常' } as Record<string, string>)[status ?? ''] ?? '未知'
 }
+function projectName(id?: string): string { return projects.value.find((item) => item.id === id)?.name ?? '未归属项目' }
 
 function syncIndexForm(): void {
   if (!selected.value) return
-  Object.assign(indexForm, { embedding_model: selected.value.embedding_model || 'BAAI/bge-small-zh-v1.5', chunk_size: selected.value.chunk_size || 800, chunk_overlap: selected.value.chunk_overlap ?? 120, top_k: selected.value.top_k || 5 })
+  Object.assign(indexForm, { embedding_model: selected.value.embedding_model || 'BAAI/bge-small-zh-v1.5', chunk_size: selected.value.chunk_size || 800, chunk_overlap: selected.value.chunk_overlap ?? 120, top_k: selected.value.top_k || 5, ocr_mode: selected.value.ocr_mode || 'auto', ocr_language: selected.value.ocr_language || 'ch', ocr_min_chars: selected.value.ocr_min_chars ?? 30 })
 }
 
 async function loadKnowledgeBases(resetSelection = false): Promise<void> {
@@ -115,12 +121,15 @@ async function loadPage(): Promise<void> {
   loading.value = true
   loadError.value = ''
   try {
-    const [allData, agentData] = await Promise.all([
+    const [allData, agentData, projectData] = await Promise.all([
       request<KnowledgeBase[] | { items: KnowledgeBase[] }>('/knowledge-bases'),
       request<AgentConfig[] | { items: AgentConfig[] }>('/agents'),
+      request<Project[]>('/projects'),
     ])
     allKnowledgeBases.value = listOf(allData)
     agents.value = listOf(agentData)
+    projects.value = listOf(projectData)
+    if (!createForm.project_id) createForm.project_id = projects.value.find((item) => item.status === 'active')?.id ?? ''
     await loadKnowledgeBases()
     if (detailId.value) {
       selectedId.value = detailId.value
@@ -172,21 +181,21 @@ async function openKnowledgeBase(id: string): Promise<void> {
   selectedId.value = id
   activeTab.value = 'overview'
   Object.assign(documentFilters, { q: '', exact: false, status: 'all', sort_by: 'created_at', sort_order: 'desc', page: 1 })
-  searchResults.value = []; searched.value = false; qaAnswer.value = ''; qaEvents.value = []
+  searchResults.value = []; searched.value = false; qaAnswer.value = ''; qaEvents.value = []; qaCitations.value = []; qaRunId.value = ''; qaCompleted.value = false
   syncIndexForm()
   await loadDocuments()
-  window.location.hash = `/knowledge/${encodeURIComponent(id)}`
+  navigateTo(`knowledge/${encodeURIComponent(id)}`)
 }
 
 function backToKnowledgeList(): void {
   detailId.value = ''
   selectedId.value = ''
   activeTab.value = 'overview'
-  window.location.hash = '/knowledge'
+  navigateTo('knowledge')
 }
 
 function syncKnowledgeRoute(): void {
-  const path = window.location.hash.replace(/^#\/?/, '').split('/')
+  const path = hashSegments()
   const id = path[0] === 'knowledge' && path[1] ? decodeURIComponent(path[1]) : ''
   if (id === detailId.value) return
   detailId.value = id
@@ -211,7 +220,7 @@ async function createKnowledgeBase(): Promise<void> {
   try {
     const created = await request<KnowledgeBase>('/knowledge-bases', { method: 'POST', ...jsonBody({ ...createForm, name: createForm.name.trim(), description: createForm.description.trim() }) })
     createOpen.value = false
-    Object.assign(createForm, { name: '', description: '', embedding_model: 'BAAI/bge-small-zh-v1.5', chunk_size: 800, chunk_overlap: 120, top_k: 5 })
+    Object.assign(createForm, { project_id: projects.value.find((item) => item.status === 'active')?.id ?? '', name: '', description: '', embedding_model: 'BAAI/bge-small-zh-v1.5', chunk_size: 800, chunk_overlap: 120, top_k: 5, ocr_mode: 'auto', ocr_language: 'ch', ocr_min_chars: 30 })
     notify('知识库已创建', 'success')
     await refreshData(); await openKnowledgeBase(created.id)
   } catch (error) { notify(formatApiError(error), 'error') }
@@ -220,7 +229,7 @@ async function createKnowledgeBase(): Promise<void> {
 
 function openEdit(): void {
   if (!selected.value) return
-  Object.assign(editForm, { name: selected.value.name, description: selected.value.description ?? '' })
+  Object.assign(editForm, { project_id: selected.value.project_id, name: selected.value.name, description: selected.value.description ?? '' })
   editOpen.value = true
 }
 
@@ -228,7 +237,7 @@ async function updateKnowledgeBase(): Promise<void> {
   if (!selected.value || !editForm.name.trim()) { notify('请填写知识库名称', 'error'); return }
   saving.value = true
   try {
-    await request<KnowledgeBase>(`/knowledge-bases/${selected.value.id}`, { method: 'PATCH', ...jsonBody({ name: editForm.name.trim(), description: editForm.description.trim() }) })
+    await request<KnowledgeBase>(`/knowledge-bases/${selected.value.id}`, { method: 'PATCH', ...jsonBody({ project_id: editForm.project_id, name: editForm.name.trim(), description: editForm.description.trim() }) })
     editOpen.value = false
     notify('知识库信息已更新', 'success')
     await refreshData()
@@ -298,12 +307,14 @@ function downloadSearchCsv(): void {
   notify('检索结果 CSV 已下载', 'success')
 }
 
-function downloadRagReport(): void {
-  if (!selected.value || !qaAnswer.value) return
-  const generatedAt = new Intl.DateTimeFormat('zh-CN', { dateStyle: 'long', timeStyle: 'medium' }).format(new Date())
-  const markdown = buildRagMarkdown({ knowledgeBase: selected.value, question: qaQuestion.value, answer: qaAnswer.value, events: qaEvents.value, citations: qaCitations.value, generatedAt })
-  downloadText(`${safeFilename(selected.value.name)}-RAG问答报告.md`, markdown, 'text/markdown;charset=utf-8')
-  notify('RAG Markdown 报告已下载', 'success')
+async function downloadRagReport(): Promise<void> {
+  if (!qaRunId.value || !qaAnswer.value || !qaCompleted.value) return
+  try {
+    const result = await download('/rag/reports', { method: 'POST', ...jsonBody({ run_id: qaRunId.value, format: reportFormat.value }) })
+    const url = URL.createObjectURL(result.blob); const link = document.createElement('a')
+    link.href = url; link.download = result.filename; document.body.appendChild(link); link.click(); link.remove(); URL.revokeObjectURL(url)
+    notify(`RAG ${reportFormat.value.toUpperCase()} 报告已下载`, 'success')
+  } catch (error) { notify(formatApiError(error), 'error') }
 }
 
 async function rebuildIndex(): Promise<void> {
@@ -317,17 +328,18 @@ async function rebuildIndex(): Promise<void> {
 async function askRag(): Promise<void> {
   const agent = ragAgents.value[0]
   if (!agent || !qaQuestion.value.trim() || qaRunning.value) return
-  qaAnswer.value = ''; qaEvents.value = []; qaCitations.value = []; qaRunning.value = true
+  qaAnswer.value = ''; qaEvents.value = []; qaCitations.value = []; qaRunId.value = ''; qaCompleted.value = false; qaRunning.value = true
   try {
     const session = await request<{ id: string }>('/sessions', { method: 'POST', ...jsonBody({ title: `RAG 实验：${qaQuestion.value.trim().slice(0, 30)}`, agent_id: agent.id }) })
     const accepted = await request<RunResponse>(`/sessions/${session.id}/runs`, { method: 'POST', ...jsonBody({ message: qaQuestion.value.trim() }) })
+    qaRunId.value = accepted.run_id
     qaSource?.close()
     qaSource = openRunEventStream(accepted.events_url, { onEvent: (event) => {
       qaEvents.value.push(event)
       if (event.type === 'model_delta') qaAnswer.value += String(event.data.content ?? '')
       if (event.type === 'retrieval' && Array.isArray(event.data.items)) qaCitations.value = event.data.items as unknown as Citation[]
-      if (event.type === 'completed') { qaAnswer.value = String(event.data.output ?? qaAnswer.value); qaRunning.value = false; qaSource?.close() }
-      if (event.type === 'failed' || event.type === 'cancelled') { qaAnswer.value += `\n\n[${event.type === 'failed' ? '运行失败' : '已取消'}] ${String(event.data.message ?? '')}`; qaRunning.value = false; qaSource?.close() }
+      if (event.type === 'completed') { qaAnswer.value = String(event.data.output ?? qaAnswer.value); qaCompleted.value = true; qaRunning.value = false; qaSource?.close() }
+      if (event.type === 'failed' || event.type === 'cancelled') { qaCompleted.value = false; qaAnswer.value += `\n\n[${event.type === 'failed' ? '运行失败' : '已取消'}] ${String(event.data.message ?? '')}`; qaRunning.value = false; qaSource?.close() }
     } })
   } catch (error) { qaRunning.value = false; notify(formatApiError(error), 'error') }
 }
@@ -375,7 +387,7 @@ onBeforeUnmount(() => { qaSource?.close(); window.removeEventListener('hashchang
           <div class="section-bar"><div><h2>知识库</h2><p>共 {{ kbTotal }} 个结果；名称可点击进入详情</p></div><StatusBadge status="ready" :label="`${kbTotal} 个知识库`" /></div>
           <div v-if="listLoading" class="mini-loading"><span class="spinner" />查询中…</div>
           <EmptyState v-else-if="!knowledgeBases.length" icon="search" title="没有匹配的知识库" description="可调整查询词或筛选条件。"><button class="button secondary small" @click="clearKbFilters">清除条件</button></EmptyState>
-          <div v-else class="table-wrap"><table class="data-table knowledge-table"><thead><tr><th>知识库名称</th><th>状态</th><th>文档</th><th>分块</th><th>绑定智能体</th><th>容量</th><th>更新时间</th><th /></tr></thead><tbody><tr v-for="kb in knowledgeBases" :key="kb.id"><td><button class="kb-name-link" type="button" @click="openKnowledgeBase(kb.id)"><span class="kb-link-icon"><AppIcon name="database" :size="16" /></span><span><strong>{{ kb.name }}</strong><small>{{ kb.description || '未填写说明' }}</small></span></button></td><td><StatusBadge :status="kb.status || 'empty'" :label="statusLabel(kb.status)" /></td><td>{{ kb.document_count ?? 0 }}</td><td>{{ kb.chunk_count ?? 0 }}</td><td>{{ kb.bound_agent_count ?? 0 }}</td><td>{{ bytes(kb.total_size_bytes) }}</td><td>{{ date(kb.updated_at) }}</td><td><button class="button ghost small" type="button" @click="openKnowledgeBase(kb.id)">进入管理 <AppIcon name="chevron" :size="13" /></button></td></tr></tbody></table></div>
+          <div v-else class="table-wrap"><table class="data-table knowledge-table"><thead><tr><th>知识库名称</th><th>所属项目</th><th>状态</th><th>文档</th><th>分块</th><th>绑定智能体</th><th>容量</th><th>更新时间</th><th /></tr></thead><tbody><tr v-for="kb in knowledgeBases" :key="kb.id"><td><button class="kb-name-link" type="button" @click="openKnowledgeBase(kb.id)"><span class="kb-link-icon"><AppIcon name="database" :size="16" /></span><span><strong>{{ kb.name }}</strong><small>{{ kb.description || '未填写说明' }}</small></span></button></td><td>{{ projectName(kb.project_id) }}</td><td><StatusBadge :status="kb.status || 'empty'" :label="statusLabel(kb.status)" /></td><td>{{ kb.document_count ?? 0 }}</td><td>{{ kb.chunk_count ?? 0 }}</td><td>{{ kb.bound_agent_count ?? 0 }}</td><td>{{ bytes(kb.total_size_bytes) }}</td><td>{{ date(kb.updated_at) }}</td><td><button class="button ghost small" type="button" @click="openKnowledgeBase(kb.id)">进入管理 <AppIcon name="chevron" :size="13" /></button></td></tr></tbody></table></div>
           <footer v-if="kbTotal" class="pager"><span>共 {{ kbTotal }} 个知识库</span><div><button :disabled="kbFilters.page <= 1" @click="changeKbPage(kbFilters.page - 1)">上一页</button><b>{{ kbFilters.page }} / {{ kbPages }}</b><button :disabled="kbFilters.page >= kbPages" @click="changeKbPage(kbFilters.page + 1)">下一页</button></div></footer>
         </section>
 
@@ -405,23 +417,23 @@ onBeforeUnmount(() => { qaSource?.close(); window.removeEventListener('hashchang
             <div class="document-toolbar"><form class="filter-search" @submit.prevent="applyDocumentFilters"><AppIcon name="search" :size="16" /><input v-model="documentFilters.q" placeholder="查询文件名…" /><label class="exact-check"><input v-model="documentFilters.exact" type="checkbox" />精确文件名</label><button class="button small">查询</button></form><select v-model="documentFilters.status" class="input compact" @change="applyDocumentFilters"><option value="all">全部状态</option><option value="ready">可检索</option><option value="indexed">已索引</option><option value="processing">处理中</option><option value="failed">异常</option></select><select v-model="documentFilters.sort_by" class="input compact" @change="applyDocumentFilters"><option value="created_at">最近添加</option><option value="filename">文件名</option><option value="size_bytes">文件大小</option><option value="chunk_count">分块数量</option></select></div>
             <LoadingState v-if="documentsLoading" :rows="2" />
             <EmptyState v-else-if="documents.length === 0" icon="file" title="没有匹配的文档" description="上传新文档，或调整文件名和状态条件。" />
-            <div v-else class="table-wrap"><table class="data-table document-table"><thead><tr><th>文件</th><th>大小</th><th>分块</th><th>状态</th><th>添加时间</th><th /></tr></thead><tbody><tr v-for="document in documents" :key="document.id"><td><span class="file-cell"><i><AppIcon name="file" :size="16" /></i><span><strong>{{ document.filename }}</strong><small>{{ document.error || document.media_type || document.filename.split('.').pop()?.toUpperCase() }}</small></span></span></td><td>{{ bytes(document.size_bytes ?? document.size) }}</td><td>{{ document.chunk_count ?? '—' }}</td><td><StatusBadge :status="document.status || 'indexed'" /></td><td>{{ date(document.created_at) }}</td><td><button class="icon-button delete-document" type="button" aria-label="删除文档" @click="deleteDocument(document)"><AppIcon name="trash" :size="15" /></button></td></tr></tbody></table></div>
+            <div v-else class="table-wrap"><table class="data-table document-table"><thead><tr><th>文件</th><th>提取方式</th><th>大小</th><th>分块</th><th>状态</th><th>添加时间</th><th /></tr></thead><tbody><tr v-for="document in documents" :key="document.id"><td><span class="file-cell"><i><AppIcon name="file" :size="16" /></i><span><strong>{{ document.filename }}</strong><small>{{ document.error || document.media_type || document.filename.split('.').pop()?.toUpperCase() }}</small></span></span></td><td><StatusBadge :status="document.extraction_method || 'text'" :label="document.extraction_method === 'hybrid' ? '文本 + OCR' : document.extraction_method === 'ocr' ? 'PaddleOCR' : '文字层'" /><small v-if="document.ocr_pages?.length">{{ document.ocr_pages.length }} 页 OCR</small></td><td>{{ bytes(document.size_bytes ?? document.size) }}</td><td>{{ document.chunk_count ?? '—' }}</td><td><StatusBadge :status="document.status || 'indexed'" /></td><td>{{ date(document.created_at) }}</td><td><button class="icon-button delete-document" type="button" aria-label="删除文档" @click="deleteDocument(document)"><AppIcon name="trash" :size="15" /></button></td></tr></tbody></table></div>
             <footer v-if="documentTotal" class="pager"><span>共 {{ documentTotal }} 个文档</span><div><button :disabled="documentFilters.page <= 1" @click="changeDocumentPage(documentFilters.page - 1)">上一页</button><b>{{ documentFilters.page }} / {{ documentPages }}</b><button :disabled="documentFilters.page >= documentPages" @click="changeDocumentPage(documentFilters.page + 1)">下一页</button></div></footer>
           </section>
 
           <template v-else-if="activeTab === 'retrieval'">
-            <section class="panel panel-padded index-config"><div class="section-heading"><div><h2>向量索引配置</h2><p>索引参数与知识库信息分离管理；保存后重建全部文档</p></div><StatusBadge status="ready" label="HYBRID" /></div><div class="config-grid"><div class="field wide"><label>嵌入模型</label><input v-model="indexForm.embedding_model" class="input" /></div><div class="field"><label>分块 Token</label><input v-model.number="indexForm.chunk_size" class="input" type="number" min="100" max="4000" /></div><div class="field"><label>重叠 Token</label><input v-model.number="indexForm.chunk_overlap" class="input" type="number" min="0" max="1000" /></div><div class="field"><label>Top K</label><input v-model.number="indexForm.top_k" class="input" type="number" min="1" max="50" /></div><button class="button secondary" :disabled="reindexing" type="button" @click="rebuildIndex">{{ reindexing ? '正在重建…' : '保存并重建' }}</button></div></section>
+            <section class="panel panel-padded index-config"><div class="section-heading"><div><h2>向量索引与 OCR 配置</h2><p>PDF 优先读取文字层，仅对扫描页调用 PaddleOCR；保存后重建全部文档</p></div><StatusBadge status="ready" label="HYBRID + OCR" /></div><div class="config-grid"><div class="field wide"><label>嵌入模型</label><input v-model="indexForm.embedding_model" class="input" /></div><div class="field"><label>分块 Token</label><input v-model.number="indexForm.chunk_size" class="input" type="number" min="100" max="4000" /></div><div class="field"><label>重叠 Token</label><input v-model.number="indexForm.chunk_overlap" class="input" type="number" min="0" max="1000" /></div><div class="field"><label>Top K</label><input v-model.number="indexForm.top_k" class="input" type="number" min="1" max="50" /></div><div class="field"><label>PDF OCR 策略</label><select v-model="indexForm.ocr_mode" class="select"><option value="off">关闭 OCR</option><option value="auto">自动回退（推荐）</option><option value="force">所有页面强制 OCR</option></select></div><div class="field"><label>OCR 语言</label><select v-model="indexForm.ocr_language" class="select"><option value="ch">中文 + 英文</option><option value="en">英文</option></select></div><div class="field"><label>文字层阈值</label><input v-model.number="indexForm.ocr_min_chars" class="input" type="number" min="0" max="1000" /><span class="field-hint">少于该字符数时启用 OCR</span></div><button class="button secondary" :disabled="reindexing" type="button" @click="rebuildIndex">{{ reindexing ? '正在重建…' : '保存并重建' }}</button></div></section>
             <section class="panel panel-padded search-panel"><div class="section-heading"><div><h2>检索试验台</h2><p>检查召回通道、融合分数与原始片段，不调用大语言模型</p></div><div class="heading-actions"><select v-model="retrievalMode" class="input mode-select"><option value="hybrid">混合检索</option><option value="dense">语义向量</option><option value="lexical">BM25 关键词</option></select><button class="button secondary small" type="button" :disabled="!searchResults.length" @click="downloadSearchCsv"><AppIcon name="download" :size="14" />下载查询结果</button></div></div><form class="search-box" @submit.prevent="search"><AppIcon name="search" :size="18" /><input v-model="searchQuery" placeholder="输入问题，检查知识库召回…" /><button class="button small" type="submit" :disabled="searching || !searchQuery.trim()">{{ searching ? '检索中…' : '检索' }}</button></form><div v-if="searching" class="search-loading"><span class="spinner" /> 正在计算查询向量…</div><EmptyState v-else-if="searched && searchResults.length === 0" icon="search" title="没有找到相关片段" description="可以换一种问法，或确认文档索引已完成。" /><div v-else-if="searchResults.length" class="result-list"><article v-for="(result, index) in searchResults" :key="`${result.document_id}-${result.chunk_index}`" class="result-card"><span class="result-rank">{{ String(index + 1).padStart(2, '0') }}</span><div><header><strong>{{ result.filename }}</strong><span>块 {{ result.chunk_index }}<template v-if="result.page"> · 第 {{ result.page }} 页</template> · {{ result.channels?.join(' + ') || retrievalMode }}</span><em>{{ (result.score * 100).toFixed(1) }}%</em></header><p>{{ result.content }}</p></div></article></div></section>
           </template>
 
-          <section v-else class="panel panel-padded rag-lab"><div class="section-heading"><div><h2>RAG 问答实验台</h2><p>运行检索、上下文组装、模型生成与引用持久化的完整链路</p></div><div class="heading-actions"><StatusBadge :status="qaRunning ? 'running' : 'ready'" :label="qaRunning ? '运行中' : '可观测'" /><button class="button secondary small" type="button" :disabled="!qaAnswer" @click="downloadRagReport"><AppIcon name="download" :size="14" />下载报告</button></div></div><div class="rag-flow"><span>问题分析</span><i>→</i><span>Dense / BM25</span><i>→</i><span>RRF 融合</span><i>→</i><span>上下文注入</span><i>→</i><span>LLM 生成</span><i>→</i><span>引用核验</span></div><form class="search-box" @submit.prevent="askRag"><AppIcon name="chat" :size="18" /><input v-model="qaQuestion" placeholder="输入需要依据知识库回答的问题…" /><button class="button small" :disabled="qaRunning || !qaQuestion.trim() || !ragAgents.length" type="submit">{{ qaRunning ? '生成中…' : '开始 RAG 问答' }}</button></form><p v-if="!ragAgents.length" class="lab-warning">请先配置一个绑定此知识库且已设置模型端点的智能体。</p><div v-if="qaEvents.length" class="qa-timeline"><span v-for="event in qaEvents.filter((item) => item.type !== 'model_delta')" :key="String(event.id)">{{ event.type }}</span></div><article v-if="qaAnswer" class="qa-answer"><h3>模型回答</h3><p>{{ qaAnswer }}</p><footer v-if="qaCitations.length"><span v-for="citation in qaCitations" :key="`${citation.document_id}-${citation.chunk_index}`">{{ citation.filename }} · 块 {{ citation.chunk_index }}<template v-if="citation.page"> · 第 {{ citation.page }} 页</template></span></footer></article></section>
+          <section v-else class="panel panel-padded rag-lab"><div class="section-heading"><div><h2>RAG 问答实验台</h2><p>运行检索、上下文组装、模型生成与引用持久化的完整链路</p></div><div class="heading-actions"><StatusBadge :status="qaRunning ? 'running' : (qaCompleted ? 'ready' : 'unknown')" :label="qaRunning ? '运行中' : (qaCompleted ? '已完成' : '可观测')" /><select v-model="reportFormat" class="select compact-select" aria-label="报告格式"><option value="md">Markdown</option><option value="docx">Word DOCX</option><option value="pdf">PDF</option></select><button class="button secondary small" type="button" :disabled="!qaCompleted || !qaAnswer || !qaRunId" @click="downloadRagReport"><AppIcon name="download" :size="14" />下载报告</button></div></div><div class="rag-flow"><span>问题分析</span><i>→</i><span>Dense / BM25</span><i>→</i><span>RRF 融合</span><i>→</i><span>上下文注入</span><i>→</i><span>LLM 生成</span><i>→</i><span>引用核验</span></div><form class="search-box" @submit.prevent="askRag"><AppIcon name="chat" :size="18" /><input v-model="qaQuestion" placeholder="输入需要依据知识库回答的问题…" /><button class="button small" :disabled="qaRunning || !qaQuestion.trim() || !ragAgents.length" type="submit">{{ qaRunning ? '生成中…' : '开始 RAG 问答' }}</button></form><p v-if="!ragAgents.length" class="lab-warning">请先配置一个绑定此知识库且已设置模型端点的智能体。</p><div v-if="qaEvents.length" class="qa-timeline"><span v-for="event in qaEvents.filter((item) => item.type !== 'model_delta')" :key="String(event.id)">{{ event.type }}</span></div><article v-if="qaAnswer" class="qa-answer"><h3>模型回答</h3><p>{{ qaAnswer }}</p><footer v-if="qaCitations.length"><span v-for="citation in qaCitations" :key="`${citation.document_id}-${citation.chunk_index}`">{{ citation.filename }} · 块 {{ citation.chunk_index }}<template v-if="citation.page"> · 第 {{ citation.page }} 页</template></span></footer></article></section>
         </main>
         <EmptyState v-else-if="isDetail" class="panel" icon="alert" title="知识库不存在" description="该知识库可能已被删除。"><button class="button secondary" @click="backToKnowledgeList">返回列表</button></EmptyState>
       </template>
     </div>
 
-    <ModalDialog :open="createOpen" title="新建知识库" description="文档与向量将存储在本机 data 目录" @close="createOpen = false"><form class="form-grid" @submit.prevent="createKnowledgeBase"><div class="field full"><label for="kb-name">名称</label><input id="kb-name" v-model="createForm.name" class="input" maxlength="120" placeholder="例如：产品资料" /></div><div class="field full"><label for="kb-description">说明</label><textarea id="kb-description" v-model="createForm.description" class="textarea" maxlength="4000" placeholder="这个知识库包含哪些内容？" /></div><div class="field full"><label>嵌入模型</label><input v-model="createForm.embedding_model" class="input" /></div><div class="field"><label>分块 Token</label><input v-model.number="createForm.chunk_size" class="input" type="number" min="100" max="4000" /></div><div class="field"><label>重叠 Token</label><input v-model.number="createForm.chunk_overlap" class="input" type="number" min="0" max="1000" /></div><div class="field"><label>Top K</label><input v-model.number="createForm.top_k" class="input" type="number" min="1" max="50" /></div></form><template #footer><button class="button secondary" type="button" @click="createOpen = false">取消</button><button class="button" type="button" :disabled="creating" @click="createKnowledgeBase">{{ creating ? '创建中…' : '创建知识库' }}</button></template></ModalDialog>
-    <ModalDialog :open="editOpen" title="编辑知识库" description="修改名称和说明不会触发重新索引" @close="editOpen = false"><form class="form-grid" @submit.prevent="updateKnowledgeBase"><div class="field full"><label for="edit-kb-name">名称</label><input id="edit-kb-name" v-model="editForm.name" class="input" maxlength="120" /></div><div class="field full"><label for="edit-kb-description">说明</label><textarea id="edit-kb-description" v-model="editForm.description" class="textarea" maxlength="4000" rows="5" /></div></form><template #footer><button class="button secondary" type="button" @click="editOpen = false">取消</button><button class="button" type="button" :disabled="saving" @click="updateKnowledgeBase">{{ saving ? '保存中…' : '保存修改' }}</button></template></ModalDialog>
+    <ModalDialog :open="createOpen" title="新建知识库" description="文档、OCR 结果与向量将存储在本机 data 目录" @close="createOpen = false"><form class="form-grid" @submit.prevent="createKnowledgeBase"><div class="field full"><label>所属项目</label><select v-model="createForm.project_id" class="select"><option v-for="project in projects.filter((item) => item.status === 'active')" :key="project.id" :value="project.id">{{ project.name }}</option></select></div><div class="field full"><label for="kb-name">名称</label><input id="kb-name" v-model="createForm.name" class="input" maxlength="120" placeholder="例如：产品资料" /></div><div class="field full"><label for="kb-description">说明</label><textarea id="kb-description" v-model="createForm.description" class="textarea" maxlength="4000" placeholder="这个知识库包含哪些内容？" /></div><div class="field full"><label>嵌入模型</label><input v-model="createForm.embedding_model" class="input" /></div><div class="field"><label>分块 Token</label><input v-model.number="createForm.chunk_size" class="input" type="number" min="100" max="4000" /></div><div class="field"><label>重叠 Token</label><input v-model.number="createForm.chunk_overlap" class="input" type="number" min="0" max="1000" /></div><div class="field"><label>Top K</label><input v-model.number="createForm.top_k" class="input" type="number" min="1" max="50" /></div><div class="field"><label>PDF OCR</label><select v-model="createForm.ocr_mode" class="select"><option value="off">关闭</option><option value="auto">扫描页自动识别</option><option value="force">强制识别所有页</option></select></div><div class="field"><label>OCR 语言</label><select v-model="createForm.ocr_language" class="select"><option value="ch">中文 + 英文</option><option value="en">英文</option></select></div></form><template #footer><button class="button secondary" type="button" @click="createOpen = false">取消</button><button class="button" type="button" :disabled="creating" @click="createKnowledgeBase">{{ creating ? '创建中…' : '创建知识库' }}</button></template></ModalDialog>
+    <ModalDialog :open="editOpen" title="编辑知识库" description="修改名称、说明和项目不会触发重新索引" @close="editOpen = false"><form class="form-grid" @submit.prevent="updateKnowledgeBase"><div class="field full"><label>所属项目</label><select v-model="editForm.project_id" class="select"><option v-for="project in projects.filter((item) => item.status === 'active')" :key="project.id" :value="project.id">{{ project.name }}</option></select></div><div class="field full"><label for="edit-kb-name">名称</label><input id="edit-kb-name" v-model="editForm.name" class="input" maxlength="120" /></div><div class="field full"><label for="edit-kb-description">说明</label><textarea id="edit-kb-description" v-model="editForm.description" class="textarea" maxlength="4000" rows="5" /></div></form><template #footer><button class="button secondary" type="button" @click="editOpen = false">取消</button><button class="button" type="button" :disabled="saving" @click="updateKnowledgeBase">{{ saving ? '保存中…' : '保存修改' }}</button></template></ModalDialog>
   </div>
 </template>
 

@@ -18,6 +18,7 @@ from sqlalchemy.orm import Session
 from .config import Settings, get_settings
 from .errors import ConflictError, HiAgentError, NotFoundError, ServiceUnavailableError
 from .models import Document, DocumentChunk, KnowledgeBase
+from .ocr import PaddleOcrProvider
 from .schemas import SearchHit
 
 SUPPORTED_EXTENSIONS = {".pdf", ".docx", ".md", ".markdown", ".txt"}
@@ -142,6 +143,7 @@ class RagService:
     def __init__(self, settings: Settings | None = None) -> None:
         self.settings = settings or get_settings()
         self.embeddings = EmbeddingProvider(self.settings)
+        self.ocr = PaddleOcrProvider(self.settings.data_dir / "models" / "paddleocr")
         self._qdrant: Any | None = None
 
     def _client(self) -> Any:
@@ -197,7 +199,14 @@ class RagService:
         document.storage_path = str(target)
         target.write_bytes(content)
         try:
-            parsed = parse_document(filename, content)
+            parsed, ocr_pages = self._parse_with_ocr(kb, filename, content)
+            document.ocr_pages = ocr_pages
+            document.ocr_engine = "PaddleOCR 3.x" if ocr_pages else None
+            document.extraction_method = (
+                "hybrid"
+                if ocr_pages and any(page.text.strip() and page.page not in ocr_pages for page in parsed)
+                else ("ocr" if ocr_pages else "text")
+            )
             chunks = chunk_pages(parsed, kb.chunk_size, kb.chunk_overlap)
             vectors = self.embeddings.embed([chunk.content for chunk in chunks], kb.embedding_model)
             for chunk, vector in zip(chunks, vectors, strict=True):
@@ -222,6 +231,38 @@ class RagService:
             document.error = str(exc)
             db.commit()
             raise
+
+    def _parse_with_ocr(self, kb: KnowledgeBase, filename: str, content: bytes) -> tuple[list[ParsedPage], list[int]]:
+        if Path(filename).suffix.lower() != ".pdf" or kb.ocr_mode == "off":
+            return parse_document(filename, content), []
+        from pypdf import PdfReader
+
+        try:
+            reader = PdfReader(io.BytesIO(content))
+            pages = [ParsedPage(page.extract_text() or "", index + 1) for index, page in enumerate(reader.pages)]
+        except Exception as exc:
+            raise HiAgentError("DOCUMENT_PARSE_FAILED", "PDF 文档损坏或无法解析", details={"reason": str(exc)}) from exc
+        targets = [
+            page.page
+            for page in pages
+            if page.page is not None and (kb.ocr_mode == "force" or len(page.text.strip()) < kb.ocr_min_chars)
+        ]
+        if targets:
+            recognized = self.ocr.recognize_pdf_pages(
+                content,
+                targets,
+                language=kb.ocr_language,
+                dpi=self.settings.ocr_render_dpi,
+                max_pages=self.settings.ocr_max_pages,
+            )
+            by_page = {item.page: item.text for item in recognized}
+            pages = [
+                ParsedPage(by_page.get(page.page, "") if page.page in targets else page.text, page.page)
+                for page in pages
+            ]
+        if not any(page.text.strip() for page in pages):
+            raise HiAgentError("EMPTY_DOCUMENT", "文档中没有可索引文本")
+        return pages, [int(item) for item in targets]
 
     def _upsert_qdrant(
         self,
@@ -372,13 +413,32 @@ class RagService:
         ]
 
     def reindex(
-        self, db: Session, kb: KnowledgeBase, *, embedding_model: str, chunk_size: int, chunk_overlap: int, top_k: int
+        self,
+        db: Session,
+        kb: KnowledgeBase,
+        *,
+        embedding_model: str,
+        chunk_size: int,
+        chunk_overlap: int,
+        top_k: int,
+        ocr_mode: str = "auto",
+        ocr_language: str = "ch",
+        ocr_min_chars: int = 30,
     ) -> KnowledgeBase:
         documents = list(db.scalars(select(Document).where(Document.knowledge_base_id == kb.id)).all())
         prepared: list[tuple[Document, list[Chunk], list[list[float]]]] = []
         for document in documents:
             content = Path(document.storage_path).read_bytes()
-            chunks = chunk_pages(parse_document(document.filename, content), chunk_size, chunk_overlap)
+            kb.ocr_mode = ocr_mode
+            kb.ocr_language = ocr_language
+            kb.ocr_min_chars = ocr_min_chars
+            parsed, ocr_pages = self._parse_with_ocr(kb, document.filename, content)
+            document.ocr_pages = ocr_pages
+            document.ocr_engine = "PaddleOCR 3.x" if ocr_pages else None
+            document.extraction_method = (
+                "hybrid" if ocr_pages and len(ocr_pages) < len(parsed) else ("ocr" if ocr_pages else "text")
+            )
+            chunks = chunk_pages(parsed, chunk_size, chunk_overlap)
             vectors = self.embeddings.embed([chunk.content for chunk in chunks], embedding_model)
             prepared.append((document, chunks, vectors))
         if self.settings.embedding_backend != "deterministic":
@@ -409,6 +469,9 @@ class RagService:
         kb.chunk_size = chunk_size
         kb.chunk_overlap = chunk_overlap
         kb.top_k = top_k
+        kb.ocr_mode = ocr_mode
+        kb.ocr_language = ocr_language
+        kb.ocr_min_chars = ocr_min_chars
         db.commit()
         db.refresh(kb)
         return kb

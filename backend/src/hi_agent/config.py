@@ -41,6 +41,11 @@ class Settings(BaseSettings):
     skills_dir: Path = Field(default_factory=lambda: _project_root() / "skills")
     database_url: str | None = None
     upload_max_bytes: int = 50 * 1024 * 1024
+    artifact_max_bytes: int = 25 * 1024 * 1024
+    artifact_max_slides: int = 30
+    ocr_max_pages: int = 100
+    ocr_render_dpi: int = 180
+    ocr_timeout_seconds: float = 120.0
     embedding_backend: Literal["fastembed", "deterministic"] = "fastembed"
     embedding_model: str = "BAAI/bge-small-zh-v1.5"
     qdrant_path: Path | None = None
@@ -55,6 +60,7 @@ class Settings(BaseSettings):
     allow_skill_scripts: bool = False
     allow_remote_skills: bool = True
     remote_skill_catalogs: str = "vercel-labs/skills@main,openai/skills@main"
+    clawhub_registry_url: str = "https://clawhub.ai"
     cors_origins: str = "http://127.0.0.1:5173,http://localhost:5173"
     auth_mode: Literal["development", "production"] = "development"
     auth_session_days: int = Field(default=14, ge=1, le=90)
@@ -125,6 +131,10 @@ class Settings(BaseSettings):
         return self.data_dir / "uploads"
 
     @property
+    def artifacts_dir(self) -> Path:
+        return self.data_dir / "artifacts"
+
+    @property
     def checkpoints_path(self) -> Path:
         return self.data_dir / "langgraph-checkpoints.sqlite3"
 
@@ -133,7 +143,7 @@ class Settings(BaseSettings):
         return [item.strip() for item in self.cors_origins.split(",") if item.strip()]
 
     def ensure_directories(self) -> None:
-        for directory in (self.data_dir, self.vectors_dir, self.uploads_dir):
+        for directory in (self.data_dir, self.vectors_dir, self.uploads_dir, self.artifacts_dir):
             directory.mkdir(parents=True, exist_ok=True)
 
     @property

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import os
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
@@ -15,13 +14,23 @@ from fastapi.staticfiles import StaticFiles
 from sqlalchemy.exc import IntegrityError
 
 from . import __version__
+from .agent_config import revision_snapshot
 from .api import router
 from .auth import public_auth_router
 from .config import Settings, get_settings
-from .database import configure_database, create_schema, initialize_tenancy, session_factory
+from .database import (
+    configure_database,
+    create_schema,
+    ensure_builtin_agents,
+    ensure_builtin_prompt_templates,
+    ensure_default_project,
+    initialize_tenancy,
+    session_factory,
+)
 from .errors import HiAgentError
 from .mcp_client import McpClient
-from .models import AgentConfig, AgentRevision, McpServerConfig, ModelEndpoint
+from .mcp_presets import ensure_builtin_mcp_presets
+from .models import AgentConfig, AgentRevision, ModelEndpoint, User
 from .rag import RagService
 from .runtime import RunManager
 from .skills import SkillRegistry
@@ -33,7 +42,10 @@ def _seed_defaults(settings: Settings, owner_id: str) -> None:
     from sqlalchemy import select
 
     with session_factory()() as db:
-        if db.scalar(select(AgentConfig).limit(1)) is None:
+        project_id = ensure_default_project(db, owner_id)
+        for existing_owner_id in db.scalars(select(User.id)).all():
+            ensure_builtin_prompt_templates(db, str(existing_owner_id))
+        if db.scalar(select(AgentConfig).where(AgentConfig.agent_type == "general").limit(1)) is None:
             endpoint = None
             if settings.llm_model:
                 endpoint = ModelEndpoint(
@@ -48,35 +60,15 @@ def _seed_defaults(settings: Settings, owner_id: str) -> None:
             db.add(
                 AgentConfig(
                     owner_id=owner_id,
+                    project_id=project_id,
                     name="默认助手",
                     description="Hi-agent 默认本地助手",
                     model_endpoint_id=endpoint.id if endpoint else None,
                 )
             )
-        if db.scalar(select(McpServerConfig).limit(1)) is None:
-            executable = (
-                settings.project_root
-                / "mcp_servers"
-                / ".venv"
-                / "bin"
-                / "hi-agent-mcp"
-            )
-            if executable.is_file() and not executable.is_symlink() and os.access(executable, os.X_OK):
-                db.add(
-                    McpServerConfig(
-                        owner_id=owner_id,
-                        name="workspace",
-                        transport="stdio",
-                        command=str(executable.resolve()),
-                        args=[
-                            "--transport",
-                            "stdio",
-                            "--workspace",
-                            str(settings.project_root),
-                        ],
-                        enabled=False,
-                    )
-                )
+        for existing_owner_id in db.scalars(select(User.id)).all():
+            ensure_builtin_agents(db, str(existing_owner_id))
+        ensure_builtin_mcp_presets(db, settings, owner_id)
         db.flush()
         for agent in db.scalars(select(AgentConfig)).all():
             if db.scalar(select(AgentRevision).where(AgentRevision.agent_id == agent.id).limit(1)) is None:
@@ -84,18 +76,7 @@ def _seed_defaults(settings: Settings, owner_id: str) -> None:
                     AgentRevision(
                         agent_id=agent.id,
                         version=1,
-                        snapshot={
-                            "name": agent.name,
-                            "description": agent.description,
-                            "system_prompt": agent.system_prompt,
-                            "model_endpoint_id": agent.model_endpoint_id,
-                            "knowledge_base_id": agent.knowledge_base_id,
-                            "skills": list(agent.skills),
-                            "mcp_servers": list(agent.mcp_servers),
-                            "tool_policy": dict(agent.tool_policy),
-                            "max_tool_loops": agent.max_tool_loops,
-                            "enabled": agent.enabled,
-                        },
+                        snapshot=revision_snapshot(agent),
                         reason="现有配置基线",
                     )
                 )
@@ -212,6 +193,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 return FileResponse(requested)
             return FileResponse(dist / "index.html")
     else:
+
         @app.get("/", include_in_schema=False)
         async def root() -> dict[str, str]:
             return {"name": "Hi-agent", "api": "/docs", "status": "/api/v1/system/status"}

@@ -1,5 +1,19 @@
 .DS_Store
+Thumbs.db
+Desktop.ini
+
+# Local environment files may contain API keys and deployment credentials.
 .env
+.env.*
+!.env.example
+*.env
+
+# Local editor and coding-assistant state.
+.idea/
+.vscode/
+.workbuddy/
+*.iml
+
 .venv/
 .python-version.local
 .tools/
@@ -19,4 +33,3 @@ data/*
 logs/*
 !logs/.gitkeep
 .hi-agent.pid
-
